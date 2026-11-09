@@ -1,0 +1,454 @@
+import { supabase } from '../config/supabase.js';
+import { BaileysService } from './baileysService.js';
+import { notificarCambioReservas } from './realtimeService.js';
+
+export interface Complejo {
+  id: string;
+  slug?: string;
+  tipo_negocio?: 'deportes' | 'barberia' | 'belleza_unas' | 'salud' | string;
+  nombre: string;
+  direccion?: string;
+  ciudad?: string;
+  telefono_whatsapp: string;
+  whatsapp_phone_number_id?: string;
+  whatsapp_token?: string;
+  nequi_numero?: string;
+  daviplata_numero?: string;
+  hora_apertura?: string;
+  hora_cierre?: string;
+  titular_cuenta?: string;
+  porcentaje_anticipo_minimo?: number;
+  monto_anticipo_fijo?: number;
+}
+
+/**
+ * Obtiene la tarifa fija del abono para el spa.
+ */
+export function getMontoAnticipoFijo(complejo: any): number {
+  if (complejo?.monto_anticipo_fijo !== undefined && complejo?.monto_anticipo_fijo !== null) {
+    const val = Number(complejo.monto_anticipo_fijo);
+    if (!isNaN(val) && val > 0) return val;
+  }
+  if (complejo?.whatsapp_phone_number_id) {
+    const num = Number(String(complejo.whatsapp_phone_number_id).trim());
+    if (!isNaN(num) && num > 0) return num;
+  }
+  if (complejo?.whatsapp_token && typeof complejo.whatsapp_token === 'string') {
+    try {
+      if (complejo.whatsapp_token.startsWith('{')) {
+        const parsed = JSON.parse(complejo.whatsapp_token);
+        if (parsed?.monto_anticipo_fijo && !isNaN(Number(parsed.monto_anticipo_fijo))) {
+          return Number(parsed.monto_anticipo_fijo);
+        }
+      } else {
+        const num = Number(complejo.whatsapp_token);
+        if (!isNaN(num) && num > 0) return num;
+      }
+    } catch {}
+  }
+  return 20000;
+}
+
+/**
+ * Determina si una fecha (YYYY-MM-DD o timestamp ISO) corresponde al mes de diciembre (mes 12).
+ * En temporada de diciembre SIEMPRE se exige anticipo aunque el switch general esté desactivado.
+ */
+export function esFechaDiciembre(fecha?: string | Date | null): boolean {
+  if (!fecha) return false;
+  if (typeof fecha === 'string') {
+    const limpio = fecha.trim();
+    const matchIso = limpio.match(/^\d{4}-(\d{2})-\d{2}/);
+    if (matchIso) {
+      return matchIso[1] === '12';
+    }
+    const d = new Date(limpio);
+    if (!isNaN(d.getTime())) {
+      const mesCol = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Bogota',
+        month: '2-digit',
+      }).format(d);
+      return mesCol === '12';
+    }
+    return false;
+  }
+  if (fecha instanceof Date && !isNaN(fecha.getTime())) {
+    const mesCol = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Bogota',
+      month: '2-digit',
+    }).format(fecha);
+    return mesCol === '12';
+  }
+  return false;
+}
+
+/**
+ * Determina si se debe exigir anticipo para una reserva según la configuración del spa
+ * o si la fecha de la cita es en diciembre (en diciembre siempre es obligatorio).
+ */
+export function requiereAnticipoParaFecha(complejo: any, fecha?: string | Date | null): boolean {
+  const checkActivo = (Number(complejo?.porcentaje_anticipo_minimo) || 0) > 0;
+  return checkActivo || esFechaDiciembre(fecha);
+}
+
+export interface Cancha {
+  id: string;
+  complejo_id: string;
+  nombre: string;
+  deporte: string;
+  precio_estandar: number;
+  precio_pico: number;
+  foto?: string | null;
+}
+
+export const MAPA_MANICURISTAS: Record<string, { nombre: string; foto: string | null }> = {
+  'Lili': { nombre: 'Lili', foto: '/equipo/lili.jpg' },
+  'Jhoana': { nombre: 'Jhoana', foto: '/equipo/jhoana.jpg' },
+  'Manuela': { nombre: 'Manuela', foto: '/equipo/manuela.jpg' },
+};
+
+export function enriquecerCancha<T extends { id?: string; nombre?: string }>(cancha: T): T & { foto?: string | null } {
+  if (!cancha) return cancha;
+  const match = (cancha.id && MAPA_MANICURISTAS[cancha.id]) ||
+                (cancha.nombre && MAPA_MANICURISTAS[cancha.nombre]);
+  if (match) {
+    return { ...cancha, nombre: match.nombre, foto: match.foto };
+  }
+  return cancha;
+}
+
+export interface HorarioDisponible {
+  hora_inicio: string;
+  hora_fin: string;
+  disponible: boolean;
+  precio: number;
+}
+
+export class BookingService {
+  /**
+   * Obtiene todos los complejos registrados
+   */
+  static async getComplejos(): Promise<Complejo[]> {
+    const { data, error } = await supabase.from('complejos').select('*').order('nombre');
+    if (error) throw error;
+    return data || [];
+  }
+
+  /**
+   * Obtiene un complejo por su ID o por su Slug (con fallback automático al primer complejo activo)
+   */
+  static async getComplejo(identificador: string): Promise<Complejo | null> {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identificador);
+    let query = supabase.from('complejos').select('*');
+    if (isUuid) {
+      query = query.eq('id', identificador);
+    } else {
+      query = query.eq('slug', identificador);
+    }
+    const { data, error } = await query.maybeSingle();
+    if (error) throw error;
+    if (data) return data;
+
+    // Fallback inteligente al primer complejo registrado si se consulta por slug
+    if (!isUuid) {
+      const todos = await this.getComplejos();
+      if (todos.length > 0) return todos[0];
+    }
+    return null;
+  }
+
+  /**
+   * Identifica qué sede recibió el mensaje de WhatsApp
+   */
+  static async getComplejoByPhone(phoneId?: string, displayPhone?: string): Promise<Complejo> {
+    if (phoneId) {
+      const { data } = await supabase
+        .from('complejos')
+        .select('*')
+        .eq('whatsapp_phone_number_id', phoneId)
+        .maybeSingle();
+      if (data) return data;
+    }
+
+    if (displayPhone) {
+      const limpio = displayPhone.replace(/\D/g, '');
+      const { data } = await supabase
+        .from('complejos')
+        .select('*')
+        .ilike('telefono_whatsapp', `%${limpio}%`)
+        .maybeSingle();
+      if (data) return data;
+    }
+
+    const complejos = await this.getComplejos();
+    if (complejos.length > 0) return complejos[0];
+
+    throw new Error('No hay sedes de Ópalo Nails Spa configuradas en el sistema.');
+  }
+
+  /**
+   * Crea una nueva sede en la plataforma
+   */
+  static async crearComplejo(datos: Partial<Complejo>): Promise<Complejo> {
+    try {
+      const { data, error } = await supabase
+        .from('complejos')
+        .insert(datos)
+        .select()
+        .single();
+
+      if (error) throw error;
+      return data;
+    } catch (err: any) {
+      if (err.message?.includes('tipo_negocio')) {
+        const { tipo_negocio, ...resto } = datos;
+        const { data, error } = await supabase
+          .from('complejos')
+          .insert(resto)
+          .select()
+          .single();
+        if (error) throw error;
+        return { ...data, tipo_negocio: tipo_negocio || 'belleza_unas' };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Obtiene o crea un cliente en la base de datos a partir de su número de WhatsApp
+   */
+  static async getOrCreateCliente(telefono: string, nombre?: string) {
+    const { data: existing, error: findError } = await supabase
+      .from('clientes')
+      .select('*')
+      .eq('telefono_wa', telefono)
+      .maybeSingle();
+
+    if (findError) throw findError;
+
+    if (existing) {
+      if (nombre && nombre.trim() && nombre.trim() !== existing.nombre) {
+        await supabase
+          .from('clientes')
+          .update({ nombre: nombre.trim() })
+          .eq('id', existing.id);
+        existing.nombre = nombre.trim();
+      }
+      return existing;
+    }
+
+    const { data: created, error: createError } = await supabase
+      .from('clientes')
+      .insert({ telefono_wa: telefono, nombre: nombre || 'Clienta WhatsApp' })
+      .select()
+      .single();
+
+    if (createError) throw createError;
+    return created;
+  }
+
+  /**
+   * Obtiene todas las especialistas activas registradas en Supabase (filtradas por complejo)
+   */
+  static async getCanchas(complejoId?: string): Promise<Cancha[]> {
+    let query = supabase.from('canchas').select('*').eq('activa', true).order('nombre');
+    if (complejoId) {
+      query = query.eq('complejo_id', complejoId);
+    }
+    const { data, error } = await query;
+    if (error) throw error;
+    return (data || []).map(enriquecerCancha);
+  }
+
+  /**
+   * Consulta los horarios disponibles ejecutando la función RPC 'obtener_horarios_disponibles'
+   */
+  static async getHorariosDisponibles(canchaId: string, fechaIso: string): Promise<HorarioDisponible[]> {
+    await this.liberarReservasExpiradas();
+
+    const { data, error } = await supabase.rpc('obtener_horarios_disponibles', {
+      p_cancha_id: canchaId,
+      p_fecha: fechaIso,
+    });
+
+    if (error) throw error;
+    const horarios = (data || []) as HorarioDisponible[];
+
+    const ahora = new Date();
+    const fechaCol = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Bogota' }));
+    const hoyColStr = `${fechaCol.getFullYear()}-${String(fechaCol.getMonth() + 1).padStart(2, '0')}-${String(fechaCol.getDate()).padStart(2, '0')}`;
+    const horaColStr = `${String(fechaCol.getHours()).padStart(2, '0')}:${String(fechaCol.getMinutes()).padStart(2, '0')}:00`;
+
+    const esHoy = fechaIso === hoyColStr;
+
+    return horarios.map((h) => {
+      if (!h.disponible) {
+        return { ...h, disponible: false };
+      }
+
+      if (esHoy && h.hora_inicio <= horaColStr) {
+        return { ...h, disponible: false };
+      }
+
+      return h;
+    });
+  }
+
+  /**
+   * Crea una pre-reserva con bloqueo de 30 minutos en PostgreSQL.
+   */
+  static async crearPreReserva(params: {
+    canchaId: string;
+    clienteId: string;
+    fechaInicio: string;
+    fechaFin: string;
+    valorTotal: number;
+    porcentajeAnticipo?: number;
+    montoAnticipo?: number;
+    exigeAnticipo?: boolean;
+  }) {
+    let anticipoRequerido = 0;
+    let esConfirmadaDirecta = false;
+
+    if (params.montoAnticipo !== undefined) {
+      anticipoRequerido = Math.min(params.valorTotal, Number(params.montoAnticipo) || 0);
+      esConfirmadaDirecta = params.exigeAnticipo !== undefined ? !params.exigeAnticipo : anticipoRequerido === 0;
+    } else {
+      const porcentaje = Number(params.porcentajeAnticipo) || 0;
+      anticipoRequerido = (params.valorTotal * porcentaje) / 100;
+      esConfirmadaDirecta = porcentaje === 0;
+    }
+
+    const expiracion = esConfirmadaDirecta ? null : new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const estado = esConfirmadaDirecta ? 'confirmada' : 'pendiente_pago';
+
+    const { data, error } = await supabase
+      .from('reservas')
+      .insert({
+        cancha_id: params.canchaId,
+        cliente_id: params.clienteId,
+        fecha_inicio: params.fechaInicio,
+        fecha_fin: params.fechaFin,
+        estado,
+        valor_total: params.valorTotal,
+        valor_anticipo_requerido: anticipoRequerido,
+        expiracion_reserva: expiracion,
+      })
+      .select('*, canchas(nombre)')
+      .single();
+
+    if (error) {
+      if (error.code === '23P01') {
+        throw new Error('Lo sentimos, este turno acaba de ser apartado por otra persona.');
+      }
+      throw error;
+    }
+
+    if (data?.id) {
+      notificarCambioReservas('INSERT', { id: data.id });
+    }
+    return data;
+  }
+
+  /**
+   * Registra el pago del anticipo y confirma la reserva en la base de datos
+   */
+  static async registrarPagoAnticipo(params: {
+    reservaId: string;
+    metodo: 'nequi' | 'daviplata' | 'transferencia_bancaria';
+    monto: number;
+    comprobanteUrl?: string;
+    referencia?: string;
+    estado?: 'pendiente' | 'aprobado';
+    revisadoPor?: string;
+    notasAdmin?: string;
+  }) {
+    const { data: pago, error: pagoError } = await supabase
+      .from('pagos_anticipos')
+      .insert({
+        reserva_id: params.reservaId,
+        metodo: params.metodo,
+        monto: params.monto,
+        comprobante_url: params.comprobanteUrl,
+        referencia_transaccion: params.referencia,
+        estado: params.estado || 'aprobado',
+        revisado_por: params.revisadoPor || 'IA_GEMINI',
+        notas_admin: params.notasAdmin || 'Auditado y aprobado automáticamente por IA',
+      })
+      .select()
+      .single();
+
+    if (pagoError) throw pagoError;
+
+    const { data: reserva, error: reservaError } = await supabase
+      .from('reservas')
+      .update({ estado: 'confirmada', expiracion_reserva: null })
+      .eq('id', params.reservaId)
+      .select()
+      .single();
+
+    if (reservaError) throw reservaError;
+    if (reserva?.id) {
+      notificarCambioReservas('UPDATE', { id: reserva.id });
+    }
+    return { pago, reserva };
+  }
+
+  /**
+   * Libera reservas pendientes cuyo tiempo de pago superó el límite establecido (30 min)
+   */
+  static async liberarReservasExpiradas() {
+    const ahora = new Date().toISOString();
+    try {
+      const { data: expiradas } = await supabase
+        .from('reservas')
+        .select('*, canchas!inner(*, complejos!inner(*)), clientes(*)')
+        .eq('estado', 'pendiente_pago')
+        .not('expiracion_reserva', 'is', null)
+        .lt('expiracion_reserva', ahora);
+
+      if (!expiradas || expiradas.length === 0) return;
+
+      for (const r of expiradas) {
+        const notas = r.notas || '';
+        if (notas.includes('[COMPROBANTE_VALIDO_IA]') || notas.includes('[COMPROBANTE_RECIBIDO]')) {
+          continue;
+        }
+
+        console.log(`[EXPIRACION] Liberando turno de reserva ${r.id} por falta de comprobante de anticipo`);
+        await supabase
+          .from('reservas')
+          .update({
+            estado: 'cancelada',
+            notas: `${notas} | [EXPIRADO] Cancelada automáticamente por superar el tiempo límite de anticipo`,
+          })
+          .eq('id', r.id);
+
+        const cliente = r.clientes as any;
+        const frontendUrl = process.env.FRONTEND_URL || 'https://opalo-nails-spa.vercel.app';
+
+        if (cliente?.telefono_wa) {
+          const horaStr = new Date(r.fecha_inicio).toLocaleTimeString('es-CO', {
+            hour: 'numeric',
+            minute: '2-digit',
+            timeZone: 'America/Bogota',
+          });
+          const msgAviso =
+            `✨ *ÓPALO NAILS SPA* ✨\n\n` +
+            `Hola *${cliente.nombre || 'Reina'}*, te informamos que tu turno para las *${horaStr}* ha sido liberado porque no recibimos el comprobante de anticipo dentro del tiempo límite.\n\n` +
+            `Si aún deseas apartar tu espacio, con gusto puedes volver a agendar en nuestra agenda web:\n` +
+            `👉 ${frontendUrl} ✨🤍`;
+
+          let cleanPhone = String(cliente.telefono_wa).replace(/\D/g, '');
+          if (cleanPhone.length === 10 && cleanPhone.startsWith('3')) cleanPhone = `57${cleanPhone}`;
+          try {
+            await BaileysService.enviarMensajeDirecto(cleanPhone, msgAviso);
+          } catch (e: any) {
+            console.warn('Error enviando aviso de liberación por Baileys:', e.message);
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error('Error en liberarReservasExpiradas:', err.message);
+    }
+  }
+}

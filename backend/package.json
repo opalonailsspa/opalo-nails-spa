@@ -1,0 +1,51 @@
+{
+  "name": "opalo-nails-backend",
+  "version": "1.0.0",
+  "description": "API y Webhook de WhatsApp para Ópalo Nails Spa (Pereira, Colombia)",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "citas",
+    "spa",
+    "unas",
+    "cejas",
+    "pestanas",
+    "opalo-nails-spa"
+  ],
+  "author": "Ópalo Nails Spa",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "@types/compression": "^1.8.1",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.13.10",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@whiskeysockets/baileys": "^6.7.24",
+    "axios": "^1.8.1",
+    "compression": "^1.8.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.7.1",
+    "helmet": "^8.3.0",
+    "pino": "^10.4.0",
+    "qrcode-terminal": "^0.12.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
+    "typescript-eslint": "^8.72.0"
+  }
+}

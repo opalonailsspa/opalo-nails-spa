@@ -1,0 +1,25 @@
+{
+  "opalo-nails": {
+    "nombre": "Ópalo Nails Spa",
+    "ciudad": "Pereira, Colombia",
+    "direccion": "Pereira, Risaralda, Colombia",
+    "instagram": "https://www.instagram.com/opalo_nailspereira?cplk=MW9ncWJwMG50anlsMQ==",
+    "horarios": "Lunes a Sábado de 8:00 AM a 7:00 PM.",
+    "parqueadero": "Contamos con zona de fácil acceso y bahía cercana.",
+    "pagos": "Efectivo, transferencia Nequi y Bancolombia.",
+    "politica_cancelacion": "Por favor avísanos con mínimo 3 horas de anticipación si necesitas reprogramar tu turno.",
+    "servicios_resumen": [
+      "Cejas y Depilación: Depilación con cera ($15.000), Depilación con hilo ($20.000), Henna ($8.000), Cera y henna ($22.000), Hilo y henna ($16.000), Bigote con cera ($8.000), Bigote con hilo ($10.000), Laminado de cejas ($55.000)",
+      "Pestañas: Lifting de pestañas ($55.000), Pestañas pelo a pelo clásicas ($80.000 - Retoque $40.000), Efecto pestañina ($80.000 - Retoque $45.000), Híbridas ($100.000 - Retoque $50.000), 3D ($100.000 - Retoque $50.000), Volumen ruso ($110.000 - Retoque $60.000), Volumen brasileño ($90.000)",
+      "Uñas Tradicional y Semipermanente: Limpieza ($13.000), Manicura tradicional ($18.000), Pedicura tradicional ($18.000), Manicura semipermanente full ($46.000), Manicura solo tono ($39.000), Pedicura Semi ($39.000), Dipping + Semi ($53.000), Base Ruber ($53.000)",
+      "Acrílico y Press On: Recubrimiento en acrílico ($75.000), Sistema Press On ($75.000), Acrílicas con tip ($90.000), Acrílicas esculpidas ($100.000), Retoque de acrílico o Press On ($65.000)",
+      "Retiros y Adicionales: Retiro de acrílico definitivo ($15.000), Retiro definitivo semipermanente ($8.000), Uña en semipermanente ($4.000), Uña Press On o recubrimiento ($7.000), Uña acrílica con tip ($8.000), Uña esculpida ($10.000)"
+    ],
+    "reglas_negocio": [
+      "Los diseños elaborados tienen tiempo y costo adicional.",
+      "En extensiones de pestañas, pasados los 20 días el retoque tiene un adicional de $5.000 a $10.000.",
+      "El retoque de acrílico o Press On incluye una uña perdida (adicional: esculpida con tip $6.000, esculpida $8.000).",
+      "Para el mes de diciembre se solicita un abono anticipado para asegurar tu cita."
+    ]
+  }
+}

@@ -1,0 +1,2137 @@
+import express, { Request, Response } from 'express';
+import cors from 'cors';
+// @ts-ignore
+import compression from 'compression';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import dotenv from 'dotenv';
+import { supabase } from './config/supabase.js';
+import { WhatsAppFlow, BotResponse } from './bot/whatsappFlow.js';
+import { ReminderService } from './services/reminderService.js';
+import { BookingService, getMontoAnticipoFijo, requiereAnticipoParaFecha, esFechaDiciembre, enriquecerCancha } from './services/bookingService.js';
+import { AIReceptionistService } from './services/aiReceptionistService.js';
+import { BotExclusionsService } from './services/botExclusionsService.js';
+import { BaileysService } from './services/baileysService.js';
+import { notificarCambioReservas } from './services/realtimeService.js';
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Configuración de Proxy para entornos detrás de reverse proxies (Render / Cloudflare)
+app.set('trust proxy', 1);
+
+// Ocultar cabecera que delata tecnología de servidor
+app.disable('x-powered-by');
+
+// Cabeceras de seguridad HTTP robustas (Anti-Clickjacking, Anti-Sniffing, HSTS)
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // Permite assets web y vistas QR sin bloquear scripts
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    crossOriginEmbedderPolicy: false,
+  })
+);
+
+// CORS seguro y optimizado
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Permitir peticiones de servidor a servidor (cron, curl, uptime) y orígenes válidos
+      callback(null, true);
+    },
+    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+    credentials: true,
+  })
+);
+
+app.use(compression());
+
+// Límites de tamaño de payload para mitigar ataques DoS / Memory Exhaustion
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// ------------------------------------------------------------------------------
+// RATE LIMITERS (Protección contra DDoS, Fuerza Bruta y Saturación de Endpoints)
+// ------------------------------------------------------------------------------
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 400, // Hasta 400 peticiones por ventana para no afectar navegación legítima
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas solicitudes desde esta dirección IP. Por favor intenta de nuevo en unos minutos.' },
+});
+
+// Limiter específico para reservas (evita bots o spam de citas automatizadas)
+const bookingLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30, // 30 reservas por cada 15 min por IP es más que suficiente para clientes reales
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Has alcanzado el límite de intentos de agendamiento. Por favor espera unos minutos.' },
+});
+
+// Limiter para pruebas y simuladores
+const testLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 45,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Límite de simulaciones alcanzado. Intenta de nuevo más tarde.' },
+});
+
+// Aplicar limiter general a todas las rutas de la API
+app.use('/api/', generalLimiter);
+
+// ------------------------------------------------------------------------------
+// HELPERS DE SANITIZACIÓN Y VALIDACIÓN DEFENSIVA (Anti-XSS, Anti-Injection)
+// ------------------------------------------------------------------------------
+export function sanitizeInput(val: any, maxLength = 255): string {
+  if (typeof val !== 'string') return '';
+  return val
+    .replace(/\0/g, '') // Eliminar null bytes
+    .replace(/<[^>]*>?/gm, '') // Eliminar etiquetas HTML / script tags
+    .trim()
+    .slice(0, maxLength);
+}
+
+export function esFormatoFechaValido(f: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(f);
+}
+
+export function esFormatoHoraValido(h: string): boolean {
+  return /^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$/.test(h);
+}
+
+export function esUUIDValido(id: string): boolean {
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id);
+}
+
+// ==============================================================================
+// 1. HEALTH CHECK & ESTADO DE CONEXIÓN
+// ==============================================================================
+app.get('/', (req: Request, res: Response) => {
+  res.json({
+    status: 'online',
+    servicio: 'Ópalo Nails Spa - API & WhatsApp Bot',
+    base_de_datos: 'Supabase PostgreSQL Conectada',
+    version: '2.0.0',
+    webhook_url: '/webhook',
+    politica_privacidad: '/politica-de-privacidad',
+    simulador_bot: '/api/bot/simulate',
+    cron_recordatorios: '/api/cron/recordatorios',
+  });
+});
+
+app.get('/politica-de-privacidad', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Política de Privacidad - Ópalo Nails Spa</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #1C2922; background: #F5F8F4; }
+    h1 { color: #2E5A44; border-bottom: 2px solid #C5A059; padding-bottom: 10px; }
+    h2 { color: #224433; margin-top: 30px; }
+    p, li { font-size: 15px; }
+    .footer { margin-top: 50px; font-size: 13px; color: #5A6B60; border-top: 1px solid #C5D6BE; padding-top: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Política de Privacidad - Ópalo Nails Spa</h1>
+  <p><strong>Última actualización:</strong> Noviembre de 2026</p>
+  <p>En <strong>Ópalo Nails Spa</strong> (Pereira, Colombia), nos tomamos muy en serio la privacidad y protección de los datos personales de nuestras clientas.</p>
+  
+  <h2>1. Información que recopilamos</h2>
+  <p>Cuando interactúas con nuestro servicio de agendamiento y atención por WhatsApp o plataforma web, podemos recopilar:</p>
+  <ul>
+    <li>Nombre completo y número de teléfono de contacto.</li>
+    <li>Historial de citas, servicios solicitados (uñas, cejas, pestañas, etc.) y fechas deseadas.</li>
+  </ul>
+
+  <h2>2. Uso de la información</h2>
+  <p>Los datos recopilados se utilizan exclusivamente para:</p>
+  <ul>
+    <li>Gestionar y confirmar tus citas en nuestro spa.</li>
+    <li>Enviarte recordatorios automáticos de tus citas para tu comodidad.</li>
+    <li>Brindarte atención y soporte personalizado sobre nuestros servicios.</li>
+  </ul>
+
+  <h2>3. Protección de tus datos</h2>
+  <p>No compartimos, vendemos ni divulgamos tu información personal con terceros para fines publicitarios. Tus datos están almacenados de forma segura con estándares de cifrado.</p>
+
+  <h2>4. Contacto</h2>
+  <p>Si tienes preguntas o deseas solicitar la eliminación de tus datos, puedes comunicarte con nosotros a través de nuestro Instagram oficial <a href="https://www.instagram.com/opalo_nailspereira?cplk=MW9ncWJwMG50anlsMQ==" target="_blank" rel="noopener noreferrer">@opalo_nailspereira</a> o en nuestra sede en Pereira, Colombia.</p>
+
+  <div class="footer">
+    <p>© 2026 Ópalo Nails Spa. Todos los derechos reservados.</p>
+  </div>
+</body>
+</html>`);
+});
+
+// ==============================================================================
+// 2. WHATSAPP BAILEYS - SERVICIO Y ENDPOINTS
+// ==============================================================================
+
+interface DebugLog {
+  timestamp: string;
+  type: 'WEBHOOK_IN' | 'SEND_SUCCESS' | 'SEND_ERROR' | 'CONFIG_CHECK';
+  detalles: any;
+}
+const debugLogs: DebugLog[] = [];
+function addDebugLog(type: DebugLog['type'], detalles: any) {
+  debugLogs.unshift({ timestamp: new Date().toISOString(), type, detalles });
+  if (debugLogs.length > 50) debugLogs.pop();
+}
+
+// Endpoint de compatibilidad / webhook (Informativo, Baileys no necesita webhooks externos)
+app.all('/webhook', (req: Request, res: Response) => {
+  res.json({
+    status: 'activo',
+    proveedor: 'baileys',
+    mensaje: 'El bot opera de forma nativa a través de Baileys (WhatsApp Web directo). No requiere webhooks externos de Meta.',
+  });
+});
+
+// Forzar sincronización dinámica de LIDs de WhatsApp
+app.get(['/api/baileys/sync-lids', '/api/debug/sync-lids'], async (req: Request, res: Response) => {
+  await BaileysService.sincronizarLids();
+  return res.json({
+    ok: true,
+    lids_mapeados: Array.from(BaileysService.lidToPhoneMap.entries()),
+    whitelist: BaileysService.getWhitelist(),
+    eventos: BaileysService.eventosDebug.slice(0, 10),
+  });
+});
+
+// Diagnóstico general y detallado del servicio WhatsApp Baileys
+app.get(['/api/debug/whatsapp', '/api/baileys/status', '/api/baileys/diagnostico'], (req: Request, res: Response) => {
+  const estado = BaileysService.getEstado();
+  res.json({
+    status: estado.status,
+    tieneQr: estado.tieneQr,
+    qr: estado.qr,
+    usuarioConectado: estado.usuarioConectado,
+    proveedor: 'baileys',
+    baileys: estado,
+    whitelist: BaileysService.getWhitelist(),
+    eventos_recientes: BaileysService.eventosDebug,
+    environment_variables: {
+      has_supabase_url: !!process.env.SUPABASE_URL,
+      has_supabase_service_key: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+      has_gemini_key: !!process.env.GEMINI_API_KEY,
+      whitelist_numbers: process.env.BAILEYS_WHITELIST_NUMBERS || 'MODO_ABIERTO_TODOS_LOS_NUMEROS',
+    },
+    total_logs: debugLogs.length,
+    recent_logs: debugLogs.slice(0, 20),
+  });
+});
+
+// Prueba de envío directo con Baileys
+app.post('/api/debug/test-send', testLimiter, async (req: Request, res: Response) => {
+  const { to, text } = req.body;
+  if (!to) {
+    return res.status(400).json({ error: 'Falta parametro "to" (ej. "573000000000")' });
+  }
+
+  let cleanTo = String(to).replace(/\D/g, '');
+  if (cleanTo.length === 10 && cleanTo.startsWith('3')) {
+    cleanTo = `57${cleanTo}`;
+  }
+
+  const enviado = await BaileysService.enviarMensajeDirecto(
+    cleanTo,
+    sanitizeInput(text, 500) || '✨ Mensaje de prueba desde el bot Baileys de Ópalo Nails Spa 🌿💛'
+  );
+
+  return res.json({
+    success: enviado,
+    proveedor: 'baileys',
+    destinatario: cleanTo,
+    estado_baileys: BaileysService.getEstado(),
+  });
+});
+
+// Simulación directa de mensaje entrante para pruebas
+app.post('/api/baileys/simular-entrante', testLimiter, async (req: Request, res: Response) => {
+  const { from, text } = req.body;
+  const tel = String(from || '573000000000').replace(/\D/g, '');
+  const dummyMessage: any = {
+    key: {
+      remoteJid: `${tel}@s.whatsapp.net`,
+      fromMe: false,
+      id: `SIM_${Date.now()}`,
+    },
+    message: {
+      conversation: text || 'hola',
+    },
+    pushName: 'Cliente Simulado',
+  };
+  await BaileysService.procesarMensajeEntrante(dummyMessage);
+  return res.json({
+    ok: true,
+    simulado: { from: tel, text: text || 'hola' },
+    eventos_recientes: BaileysService.eventosDebug,
+  });
+});
+
+// Reconectar WebSocket suavemente manteniendo credenciales
+app.all(['/api/baileys/reconnect', '/api/debug/reconnect'], async (req: Request, res: Response) => {
+  await BaileysService.reconectarSuave();
+  return res.json({ ok: true, mensaje: 'Reconexión suave de WhatsApp solicitada exitosamente' });
+});
+
+// Desvincular sesión y forzar generación de nuevo QR
+app.all('/api/baileys/relink', async (req: Request, res: Response) => {
+  await BaileysService.desvincularYReiniciar();
+  return res.redirect('/qr');
+});
+
+// Interfaz web visual para escanear el código QR fácilmente desde el celular
+app.get(['/qr', '/api/baileys/qr'], (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vincular WhatsApp - Ópalo Nails Spa</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #F5F8F4; color: #1C2922; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; }
+    .card { background: white; border-radius: 24px; padding: 32px; max-width: 440px; width: 100%; box-shadow: 0 10px 30px rgba(46, 90, 68, 0.12); text-align: center; border: 1px solid #C5D6BE; }
+    .logo { font-size: 38px; margin-bottom: 8px; }
+    h1 { color: #2E5A44; font-size: 22px; font-weight: 800; margin-bottom: 6px; }
+    p.sub { font-size: 14px; color: #5A6B60; margin-bottom: 24px; }
+    #qr-container { display: flex; justify-content: center; align-items: center; min-height: 260px; padding: 16px; background: #F5F8F4; border-radius: 16px; border: 2px dashed #C5A059; margin-bottom: 20px; position: relative; }
+    #qrcode img { margin: 0 auto; border-radius: 8px; }
+    .status-badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 999px; font-size: 13px; font-weight: 700; margin-bottom: 16px; }
+    .status-esperando { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+    .status-conectado { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+    .status-conectando { background: #E8F0E5; color: #2E5A44; border: 1px solid #90B083; }
+    .instructions { text-align: left; background: #E8F0E5; border-radius: 14px; padding: 14px 16px; font-size: 13px; color: #1C2922; line-height: 1.5; border: 1px solid #C5D6BE; }
+    .instructions ol { margin-left: 20px; }
+    .instructions li { margin-bottom: 4px; }
+    .footer { margin-top: 18px; font-size: 12px; color: #5A6B60; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">✨💅</div>
+    <h1>Ópalo Nails Spa</h1>
+    <p class="sub">Vinculación de WhatsApp (Baileys)</p>
+
+    <div id="status-container">
+      <div class="status-badge status-conectando" id="status-badge">🔄 Consultando estado...</div>
+    </div>
+
+    <div id="qr-container">
+      <div id="qrcode"></div>
+      <div id="msg-placeholder" style="color: #5A6B60; font-size: 14px;">Cargando código QR...</div>
+    </div>
+
+    <div class="instructions" id="instructions">
+      <strong>📱 Cómo vincular:</strong>
+      <ol>
+        <li>Abre WhatsApp en tu teléfono</li>
+        <li>Toca <strong>Ajustes</strong> o <strong>Menú (⋮)</strong></li>
+        <li>Selecciona <strong>Dispositivos vinculados</strong></li>
+        <li>Toca <strong>Vincular un dispositivo</strong> y escanea el código</li>
+      </ol>
+    </div>
+
+    <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+      <a href="/api/baileys/relink" onclick="return confirm('¿Deseas desvincular la sesión actual y generar un nuevo código QR?');" style="display: inline-block; padding: 10px 18px; background: #2E5A44; color: white; border-radius: 999px; text-decoration: none; font-size: 13px; font-weight: 700; box-shadow: 0 4px 12px rgba(46, 90, 68, 0.25);">🔄 Desvincular y Escanear Nuevo QR</a>
+      <a href="/qr/image" target="_blank" style="display: inline-block; padding: 10px 18px; background: #C5A059; color: white; border-radius: 999px; text-decoration: none; font-size: 13px; font-weight: 700;">🖼️ Ver Imagen Directa</a>
+    </div>
+
+    <p class="footer">Se actualiza automáticamente cada 3 segundos</p>
+  </div>
+
+  <script>
+    let ultimoQr = '';
+    let qrInstancia = null;
+
+    async function actualizarEstado() {
+      try {
+        const res = await fetch('/api/baileys/status');
+        const data = await res.json();
+        const badge = document.getElementById('status-badge');
+        const placeholder = document.getElementById('msg-placeholder');
+        const qrDiv = document.getElementById('qrcode');
+        const instructions = document.getElementById('instructions');
+
+        const status = data.status || data.baileys?.status || 'INICIANDO';
+        const qr = data.qr || data.baileys?.qr || '';
+        const usuario = data.usuarioConectado || data.baileys?.usuarioConectado;
+
+        if (status === 'CONECTADO') {
+          badge.className = 'status-badge status-conectado';
+          badge.innerHTML = '✅ WhatsApp Conectado';
+          placeholder.style.display = 'block';
+          placeholder.innerHTML = '🎉 ¡El bot está 100% activo y respondiendo chats!<br><br><strong>Usuario:</strong> ' + (usuario || 'Sesión Activa');
+          qrDiv.style.display = 'none';
+          instructions.style.display = 'none';
+        } else if (qr && qr.length > 5) {
+          badge.className = 'status-badge status-esperando';
+          badge.innerHTML = '⏳ Esperando que escanees el QR';
+          placeholder.style.display = 'none';
+          qrDiv.style.display = 'block';
+          instructions.style.display = 'block';
+
+          if (ultimoQr !== qr) {
+            ultimoQr = qr;
+            qrDiv.innerHTML = '';
+            try {
+              if (typeof QRCode !== 'undefined') {
+                qrInstancia = new QRCode(qrDiv, {
+                  text: qr,
+                  width: 230,
+                  height: 230,
+                  colorDark: '#000000',
+                  colorLight: '#ffffff',
+                  correctLevel: QRCode.CorrectLevel.M
+                });
+              } else {
+                throw new Error('QRCode lib no disponible');
+              }
+            } catch (err) {
+              console.warn('Fallback a imagen QR externa:', err);
+              qrDiv.innerHTML = '<img src="https://api.qrserver.com/v1/create-qr-code/?size=230x230&data=' + encodeURIComponent(qr) + '" style="border-radius: 8px; display: block; margin: 0 auto; max-width: 100%;" alt="Código QR WhatsApp" />';
+            }
+          }
+        } else {
+          badge.className = 'status-badge status-conectando';
+          badge.innerHTML = '🔄 ' + status;
+          placeholder.style.display = 'block';
+          placeholder.textContent = 'Generando nuevo código QR...';
+          qrDiv.style.display = 'none';
+        }
+      } catch (e) {
+        console.error('Error consultando estado:', e);
+      }
+    }
+
+    actualizarEstado();
+    setInterval(actualizarEstado, 3000);
+  </script>
+</body>
+</html>`);
+});
+
+app.get(['/qr/image', '/api/baileys/qr.png'], (req: Request, res: Response) => {
+  const estado = BaileysService.getEstado();
+  if (!estado.qr) {
+    return res.status(404).send('No hay código QR disponible en este momento. Estado actual: ' + estado.status);
+  }
+  return res.redirect('https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(estado.qr));
+});
+
+/**
+ * Función central de despacho de mensajes de WhatsApp
+ * Utiliza Baileys exclusivamente simulando tipeo humano y respetando lista blanca.
+ */
+async function enviarMensajeWhatsApp(
+  to: string,
+  message: string | BotResponse,
+  _customToken?: string,
+  _customPhoneId?: string
+): Promise<boolean> {
+  let cleanTo = String(to).replace(/\D/g, '');
+  if (cleanTo.length === 10 && cleanTo.startsWith('3')) {
+    cleanTo = `57${cleanTo}`;
+  }
+
+  const enviado = await BaileysService.enviarMensajeDirecto(cleanTo, message);
+  if (enviado) {
+    console.log(`✅ [WHATSAPP BAILEYS ENVIADO a ${cleanTo}]`);
+    addDebugLog('SEND_SUCCESS', { to: cleanTo, provider: 'baileys' });
+  } else {
+    console.warn(`⚠️ [WHATSAPP BAILEYS NO ENVIADO a ${cleanTo}]: No conectado o número en lista de exclusión`);
+    addDebugLog('SEND_ERROR', { to: cleanTo, provider: 'baileys', motivo: 'No conectado o silenciado por exclusión' });
+  }
+  return enviado;
+}
+
+// ==============================================================================
+// 2.1 LISTA DE EXCLUSIÓN DE WHATSAPP (BOT SILENCIADO - ATENCIÓN HUMANA MANUAL)
+// ==============================================================================
+app.get('/api/bot/exclusiones', async (req: Request, res: Response) => {
+  try {
+    const exclusiones = await BotExclusionsService.getExclusiones();
+    res.json({ success: true, exclusiones });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/bot/exclusiones', async (req: Request, res: Response) => {
+  try {
+    const { telefono, nombre, motivo } = req.body;
+    if (!telefono) {
+      return res.status(400).json({ success: false, error: 'El número de teléfono es requerido' });
+    }
+    const nueva = await BotExclusionsService.agregarExclusion(telefono, nombre, motivo);
+    res.json({ success: true, exclusion: nueva });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/bot/exclusiones/:telefono', async (req: Request, res: Response) => {
+  try {
+    const { telefono } = req.params;
+    await BotExclusionsService.eliminarExclusion(telefono);
+    res.json({ success: true, message: 'Número eliminado de la lista de exclusión. Bot reactivado.' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==============================================================================
+// 3. SIMULADOR CONVERSACIONAL DE WHATSAPP (SOPORTA SELECCIÓN DE EMPRESA)
+// ==============================================================================
+app.post('/api/bot/simulate', testLimiter, async (req: Request, res: Response) => {
+  try {
+    const rawTelefono = String(req.body.telefono || '573009999999').replace(/\D/g, '').slice(0, 15);
+    const telefono = rawTelefono || '573009999999';
+    const mensaje = sanitizeInput(req.body.mensaje || 'HOLA', 500);
+    const nombre = sanitizeInput(req.body.nombre || 'Clienta', 80);
+    const complejo_id = req.body.complejo_id;
+    let complejo = null;
+
+    if (complejo_id) {
+      complejo = await BookingService.getComplejo(complejo_id);
+    }
+    if (!complejo) {
+      const complejos = await BookingService.getComplejos();
+      complejo = complejos[0];
+    }
+
+    const respuesta = await WhatsAppFlow.procesarMensaje(telefono, mensaje, nombre, complejo);
+    res.json({
+      complejo: complejo.nombre,
+      remitente: telefono,
+      mensaje_recibido: mensaje,
+      respuesta_bot: typeof respuesta === 'string' ? respuesta : respuesta.texto,
+      interactive: typeof respuesta === 'object' ? respuesta.interactive : undefined,
+      urlRedirect: typeof respuesta === 'object' ? respuesta.urlRedirect : undefined,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==============================================================================
+// 4. GESTIÓN MULTI-TENANT DE EMPRESAS (COMPLEJOS)
+// ==============================================================================
+
+// Listar todos los complejos deportivos
+app.get('/api/complejos', async (req: Request, res: Response) => {
+  try {
+    const complejos = await BookingService.getComplejos();
+    res.json(complejos);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Registrar un nuevo complejo deportivo en la plataforma
+app.post('/api/complejos', async (req: Request, res: Response) => {
+  try {
+    const nuevoComplejo = await BookingService.crearComplejo(req.body);
+    res.status(201).json(nuevoComplejo);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Actualizar configuración de un complejo (WhatsApp Token, Phone ID, Nequi, etc.)
+app.patch('/api/complejos/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) {
+    return res.status(400).json({ error: 'ID de complejo inválido' });
+  }
+  try {
+    const { data, error } = await supabase
+      .from('complejos')
+      .update(req.body)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+async function obtenerComplejoSpa() {
+  const { data: porSlug } = await supabase
+    .from('complejos')
+    .select('*')
+    .eq('slug', 'opalo-nails')
+    .maybeSingle();
+
+  if (porSlug) return porSlug;
+
+  const { data: primero } = await supabase
+    .from('complejos')
+    .select('*')
+    .limit(1)
+    .maybeSingle();
+
+  return primero;
+}
+
+// Consultar configuración actual de anticipos, cuentas y horario del spa
+app.get('/api/spa/config', async (req: Request, res: Response) => {
+  try {
+    const complejo = await obtenerComplejoSpa();
+    if (!complejo) return res.status(404).json({ error: 'Spa no encontrado' });
+
+    const porcentajeMin = Number(complejo.porcentaje_anticipo_minimo) || 0;
+    const exigeAnticipo = porcentajeMin > 0;
+    const montoFijo = getMontoAnticipoFijo(complejo);
+
+    res.json({
+      exigeAnticipo,
+      montoAnticipoFijo: montoFijo,
+      porcentajeAnticipo: montoFijo, // Compatibilidad
+      nequiNumero: complejo.nequi_numero || 'Pendiente por configurar',
+      bancolombiaNumero: complejo.daviplata_numero || 'Pendiente por configurar',
+      titularCuenta: complejo.titular_cuenta || 'Ópalo Nails Spa',
+      horaApertura: complejo.hora_apertura ? complejo.hora_apertura.slice(0, 5) : '08:00',
+      horaCierre: complejo.hora_cierre ? complejo.hora_cierre.slice(0, 5) : '19:00',
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Actualizar configuración de anticipos, cuentas y horario del spa desde el Dashboard
+app.patch('/api/spa/config', async (req: Request, res: Response) => {
+  try {
+    const {
+      exigeAnticipo,
+      montoAnticipoFijo,
+      porcentajeAnticipo,
+      nequiNumero,
+      bancolombiaNumero,
+      titularCuenta,
+      horaApertura,
+      horaCierre,
+    } = req.body;
+
+    const montoFijo = Number(montoAnticipoFijo ?? porcentajeAnticipo);
+    const montoFijoValido = !isNaN(montoFijo) && montoFijo > 0 ? montoFijo : 20000;
+
+    const updateData: any = {};
+    if (exigeAnticipo !== undefined) {
+      if (!exigeAnticipo) {
+        updateData.porcentaje_anticipo_minimo = 0;
+      } else {
+        // Marcamos como 1.00 en la base de datos (seguro para NUMERIC(5,2) sin desbordamiento)
+        updateData.porcentaje_anticipo_minimo = 1;
+      }
+    }
+
+    // Persistir el valor fijo en el campo seguro whatsapp_phone_number_id (VARCHAR que NO es sobreescrito por Baileys)
+    if (montoAnticipoFijo !== undefined || porcentajeAnticipo !== undefined || exigeAnticipo !== undefined) {
+      updateData.whatsapp_phone_number_id = String(montoFijoValido);
+    }
+
+    if (nequiNumero !== undefined) updateData.nequi_numero = String(nequiNumero).trim();
+    if (bancolombiaNumero !== undefined) updateData.daviplata_numero = String(bancolombiaNumero).trim();
+    if (titularCuenta !== undefined) updateData.titular_cuenta = String(titularCuenta).trim();
+
+    if (horaApertura !== undefined) {
+      const hAper = String(horaApertura).trim().slice(0, 5);
+      if (/^\d{2}:\d{2}$/.test(hAper)) {
+        updateData.hora_apertura = `${hAper}:00`;
+      }
+    }
+    if (horaCierre !== undefined) {
+      const hCier = String(horaCierre).trim().slice(0, 5);
+      if (/^\d{2}:\d{2}$/.test(hCier)) {
+        updateData.hora_cierre = `${hCier}:00`;
+      }
+    }
+
+    const complejoActual = await obtenerComplejoSpa();
+    if (!complejoActual) return res.status(404).json({ error: 'Spa no encontrado' });
+
+    const { data, error } = await supabase
+      .from('complejos')
+      .update(updateData)
+      .eq('id', complejoActual.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    const porcResult = Number(data.porcentaje_anticipo_minimo) || 0;
+    const finalMontoFijo = getMontoAnticipoFijo(data);
+
+    res.json({
+      success: true,
+      config: {
+        exigeAnticipo: porcResult > 0,
+        montoAnticipoFijo: finalMontoFijo,
+        porcentajeAnticipo: finalMontoFijo,
+        nequiNumero: data.nequi_numero || 'Pendiente por configurar',
+        bancolombiaNumero: data.daviplata_numero || 'Pendiente por configurar',
+        titularCuenta: data.titular_cuenta || 'Ópalo Nails Spa',
+        horaApertura: data.hora_apertura ? data.hora_apertura.slice(0, 5) : '08:00',
+        horaCierre: data.hora_cierre ? data.hora_cierre.slice(0, 5) : '19:00',
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Consultar base de conocimiento / FAQ personalizada de un complejo
+app.get('/api/complejos/:id/faq', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) {
+    return res.status(400).json({ error: 'ID de complejo inválido' });
+  }
+  try {
+    const complejo = await BookingService.getComplejo(id);
+    if (!complejo) return res.status(404).json({ error: 'Complejo no encontrado' });
+    const info = AIReceptionistService.getConocimientoComplejo(complejo);
+    res.json(info);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Actualizar base de conocimiento / FAQ personalizada de un complejo
+app.post('/api/complejos/:id/faq', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) {
+    return res.status(400).json({ error: 'ID de complejo inválido' });
+  }
+  try {
+    AIReceptionistService.guardarConocimientoComplejo(id, req.body);
+    res.json({ success: true, message: 'Conocimiento del recepcionista virtual actualizado con éxito' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==============================================================================
+// 5. ENDPOINTS REST POR COMPLEJO (CALENDARIO, RESERVAS, MÉTRICAS)
+// ==============================================================================
+
+// Lista de Canchas filtradas por complejo
+app.get('/api/canchas', async (req: Request, res: Response) => {
+  const { complejo_id } = req.query;
+  try {
+    const canchas = await BookingService.getCanchas(complejo_id as string | undefined);
+    res.json(canchas);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Lista de Reservas para el Calendario (filtradas por complejo)
+app.get('/api/reservas', async (req: Request, res: Response) => {
+  const { desde, hasta, complejo_id } = req.query;
+
+  let query = supabase
+    .from('reservas')
+    .select('*, canchas!inner(id, nombre, deporte, complejo_id), clientes(nombre, telefono_wa), pagos_anticipos(*)');
+
+  if (complejo_id) {
+    query = query.eq('canchas.complejo_id', complejo_id as string);
+  }
+  if (desde) query = query.gte('fecha_inicio', desde as string);
+  if (hasta) query = query.lte('fecha_fin', hasta as string);
+
+  const { data, error } = await query;
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// Bloquear Horarios (1 hora o varias horas, para admin o manicuristas)
+app.post('/api/bloqueos', async (req: Request, res: Response) => {
+  try {
+    const {
+      cancha_id,
+      cancha_ids,
+      fecha,
+      horas,
+      fecha_inicio,
+      fecha_fin,
+      duracion_minutos = 60,
+      motivo = 'Horario bloqueado',
+      bloqueado_por = 'Personal del Spa',
+    } = req.body;
+
+    const idsCanchas: string[] = [];
+    if (Array.isArray(cancha_ids) && cancha_ids.length > 0) {
+      idsCanchas.push(...cancha_ids);
+    } else if (cancha_id) {
+      if (Array.isArray(cancha_id)) {
+        idsCanchas.push(...cancha_id);
+      } else {
+        idsCanchas.push(cancha_id);
+      }
+    }
+
+    if (idsCanchas.length === 0) {
+      return res.status(400).json({ error: 'Debes seleccionar al menos una manicurista / especialista.' });
+    }
+
+    const registrosAInsertar: any[] = [];
+
+    // Si viene fecha_inicio y fecha_fin en formato ISO directo
+    if (fecha_inicio && fecha_fin) {
+      for (const cid of idsCanchas) {
+        registrosAInsertar.push({
+          cancha_id: cid,
+          cliente_id: null,
+          fecha_inicio,
+          fecha_fin,
+          estado: 'bloqueada',
+          valor_total: 0,
+          valor_anticipo_requerido: 0,
+          notas: `🔒 BLOQUEO: ${motivo} | Por: ${bloqueado_por}`,
+        });
+      }
+    } else if (fecha && Array.isArray(horas) && horas.length > 0) {
+      // Si viene fecha YYYY-MM-DD y lista de horas ['09:30', '10:30', ...]
+      for (const h of horas) {
+        const dInicio = new Date(`${fecha}T${h}:00-05:00`);
+        const dFin = new Date(dInicio.getTime() + (Number(duracion_minutos) || 60) * 60 * 1000);
+
+        for (const cid of idsCanchas) {
+          registrosAInsertar.push({
+            cancha_id: cid,
+            cliente_id: null,
+            fecha_inicio: dInicio.toISOString(),
+            fecha_fin: dFin.toISOString(),
+            estado: 'bloqueada',
+            valor_total: 0,
+            valor_anticipo_requerido: 0,
+            notas: `🔒 BLOQUEO: ${motivo} | Hora: ${h} | Por: ${bloqueado_por}`,
+          });
+        }
+      }
+    } else if (fecha && req.body.hora) {
+      // Si viene una sola hora
+      const h = req.body.hora;
+      const dInicio = new Date(`${fecha}T${h}:00-05:00`);
+      const dFin = new Date(dInicio.getTime() + (Number(duracion_minutos) || 60) * 60 * 1000);
+
+      for (const cid of idsCanchas) {
+        registrosAInsertar.push({
+          cancha_id: cid,
+          cliente_id: null,
+          fecha_inicio: dInicio.toISOString(),
+          fecha_fin: dFin.toISOString(),
+          estado: 'bloqueada',
+          valor_total: 0,
+          valor_anticipo_requerido: 0,
+          notas: `🔒 BLOQUEO: ${motivo} | Hora: ${h} | Por: ${bloqueado_por}`,
+        });
+      }
+    } else {
+      return res.status(400).json({ error: 'Faltan parámetros de fecha y horario para realizar el bloqueo.' });
+    }
+
+    const ahoraMs = Date.now();
+    const hayHorariosPasados = registrosAInsertar.some(
+      (r) => new Date(r.fecha_inicio).getTime() <= ahoraMs
+    );
+    if (hayHorariosPasados) {
+      return res.status(400).json({
+        error: 'No es posible bloquear un horario que ya pasó.',
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('reservas')
+      .insert(registrosAInsertar)
+      .select('*, canchas(nombre)');
+
+    if (error) {
+      if (error.code === '23P01') {
+        return res.status(409).json({
+          error: 'Uno o más de los horarios seleccionados ya tiene una cita o bloqueo registrado.',
+        });
+      }
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.status(201).json({
+      success: true,
+      bloqueados: data?.length || 0,
+      data,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Desbloquear Horario (Eliminar bloqueo específico)
+app.delete('/api/bloqueos/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) return res.status(400).json({ error: 'ID de bloqueo inválido' });
+  const { error } = await supabase
+    .from('reservas')
+    .delete()
+    .eq('id', id)
+    .eq('estado', 'bloqueada');
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true, message: 'Horario desbloqueado con éxito' });
+});
+
+// Actualizar estado de una reserva
+app.patch('/api/reservas/:id/estado', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) return res.status(400).json({ error: 'ID de reserva inválido' });
+  const { estado } = req.body;
+
+  const { data, error } = await supabase
+    .from('reservas')
+    .update({ estado: sanitizeInput(estado, 30) })
+    .eq('id', id)
+    .select();
+
+  if (error) return res.status(500).json({ error: error.message });
+  notificarCambioReservas('UPDATE', { id });
+  res.json(data);
+});
+
+// Obtener detalles de una reserva por ID
+app.get('/api/reservas/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) return res.status(400).json({ error: 'ID de reserva inválido' });
+  try {
+    const { data: reserva, error } = await supabase
+      .from('reservas')
+      .select('*, canchas(*), clientes(*)')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!reserva) return res.status(404).json({ error: 'Reserva no encontrada' });
+
+    let abonoPrevio = 0;
+    try {
+      const { data: pagos } = await supabase
+        .from('pagos_anticipos')
+        .select('monto')
+        .eq('reserva_id', id)
+        .eq('estado', 'aprobado');
+      if (pagos && pagos.length > 0) {
+        abonoPrevio = pagos.reduce((acc, p) => acc + Number(p.monto || 0), 0);
+      }
+    } catch {}
+
+    // Si no hay registro en pagos_anticipos, solo reconocer abono si la reserva estaba confirmada con valor_anticipo_requerido > 0
+    if (abonoPrevio === 0 && reserva.estado === 'confirmada' && Number(reserva.valor_anticipo_requerido) > 0) {
+      abonoPrevio = Number(reserva.valor_anticipo_requerido);
+    }
+
+    const matchSvc = (reserva.notas || '').match(/Servicio:\s*([^|[\n]+)/i);
+    const servicioNombre = matchSvc && matchSvc[1] ? matchSvc[1].trim() : undefined;
+
+    res.json({
+      ...reserva,
+      servicio_nombre: servicioNombre,
+      abono_previo: abonoPrevio,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Eliminar una reserva (Cancelar y remover del sistema)
+app.delete('/api/reservas/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) return res.status(400).json({ error: 'ID de reserva inválido' });
+
+  // Primero eliminamos pagos asociados si los hubiese
+  await supabase.from('pagos_anticipos').delete().eq('reserva_id', id);
+
+  const { error } = await supabase
+    .from('reservas')
+    .delete()
+    .eq('id', id);
+
+  if (error) return res.status(500).json({ error: error.message });
+  notificarCambioReservas('DELETE', { id });
+  res.json({ success: true, message: 'Reserva eliminada con éxito' });
+});
+
+// ==============================================================================
+// OPCIÓN A: APROBACIÓN ASISTIDA DESDE EL VISOR WEB (CON NOTIFICACIÓN WHATSAPP)
+// ==============================================================================
+
+// 1. Aprobar Anticipo manualmente desde el Visor Web
+app.patch('/api/reservas/:id/aprobar-anticipo', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) return res.status(400).json({ error: 'ID de reserva inválido' });
+  const notas_admin = sanitizeInput(req.body.notas_admin, 255);
+
+  try {
+    const { data: reserva, error: errRes } = await supabase
+      .from('reservas')
+      .select('*, canchas!inner(*, complejos!inner(*)), clientes(*)')
+      .eq('id', id)
+      .single();
+
+    if (errRes || !reserva) {
+      return res.status(404).json({ error: 'Reserva no encontrada' });
+    }
+
+    const notasPrevias = (reserva.notas || '').trim();
+    const notasActualizadas = notasPrevias
+      ? `${notasPrevias} | [ANTICIPO_APROBADO_MANUAL: ${notas_admin || 'Aprobado desde Visor Web'}]`
+      : (notas_admin || 'Anticipo aprobado manualmente por administrador en Visor Web');
+
+    const { data: reservaActualizada, error: errUpd } = await supabase
+      .from('reservas')
+      .update({
+        estado: 'confirmada',
+        expiracion_reserva: null,
+        notas: notasActualizadas,
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (errUpd) throw errUpd;
+
+    await supabase.from('pagos_anticipos').insert({
+      reserva_id: id,
+      metodo: 'nequi',
+      monto: reserva.valor_anticipo_requerido,
+      estado: 'aprobado',
+      revisado_por: 'ADMIN_VISOR',
+      notas_admin: notas_admin || 'Aprobado desde Visor Web',
+    });
+
+    const cliente = reserva.clientes as any;
+    const cancha = reserva.canchas as any;
+    const complejo = cancha?.complejos as any;
+
+    if (cliente?.telefono_wa) {
+      const fechaFmt = new Date(reserva.fecha_inicio).toLocaleDateString('es-CO', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        timeZone: 'America/Bogota',
+      });
+      const horaInicio = new Date(reserva.fecha_inicio).toLocaleTimeString('es-CO', {
+        hour: 'numeric',
+        minute: '2-digit',
+        timeZone: 'America/Bogota',
+      });
+      const horaFin = new Date(reserva.fecha_fin).toLocaleTimeString('es-CO', {
+        hour: 'numeric',
+        minute: '2-digit',
+        timeZone: 'America/Bogota',
+      });
+
+      const saldoPendiente = (Number(reserva.valor_total) - Number(reserva.valor_anticipo_requerido)).toLocaleString('es-CO');
+
+      const mensajeConfirmacion =
+        `✨🌿 *¡ANTICIPO APROBADO CON ÉXITO!* 🌿✨\n\n` +
+        `Hola *${cliente.nombre || 'Hermosa'}*, tu comprobante de pago ha sido verificado y aprobado por la administración de *${complejo?.nombre || 'Ópalo Nails Spa'}*.\n\n` +
+        `💅 Especialista: *${cancha.nombre}*\n` +
+        `📅 Fecha: *${fechaFmt}*\n` +
+        `⏰ Horario: *${horaInicio} a ${horaFin}*\n` +
+        `💵 Saldo a pagar en el spa: *$${saldoPendiente}*\n\n` +
+        `✅ Tu cita está 100% CONFIRMADA. ¡Te esperamos con todo el cariño para consentirte! 💛✨`;
+
+      await enviarMensajeWhatsApp(
+        cliente.telefono_wa,
+        mensajeConfirmacion,
+        complejo?.whatsapp_token,
+        complejo?.whatsapp_phone_number_id
+      );
+    }
+
+    res.json({ success: true, reserva: reservaActualizada });
+  } catch (error: any) {
+    console.error('Error aprobando anticipo:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 2. Rechazar Comprobante de Anticipo desde el Visor Web
+app.patch('/api/reservas/:id/rechazar-anticipo', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) return res.status(400).json({ error: 'ID de reserva inválido' });
+  const motivo = sanitizeInput(req.body.motivo, 255);
+
+  try {
+    const { data: reserva, error: errRes } = await supabase
+      .from('reservas')
+      .select('*, canchas!inner(*, complejos!inner(*)), clientes(*)')
+      .eq('id', id)
+      .single();
+
+    if (errRes || !reserva) {
+      return res.status(404).json({ error: 'Reserva no encontrada' });
+    }
+
+    const notasPrevias = (reserva.notas || '').trim();
+    const notasActualizadas = notasPrevias
+      ? `${notasPrevias} | [RECHAZADO_ADMIN: ${motivo || 'Comprobante no válido o pago no recibido'}]`
+      : `Rechazado por admin: ${motivo || 'Comprobante no válido o pago no recibido'}`;
+
+    const { data: reservaActualizada, error: errUpd } = await supabase
+      .from('reservas')
+      .update({
+        estado: 'cancelada',
+        notas: notasActualizadas,
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (errUpd) throw errUpd;
+
+    const cliente = reserva.clientes as any;
+    const cancha = reserva.canchas as any;
+    const complejo = cancha?.complejos as any;
+
+    if (cliente?.telefono_wa) {
+      const mensajeRechazo =
+        `❌ *Comprobante no aprobado:*\n\n` +
+        `Hola *${cliente.nombre || 'Hermosa'}*, la administración de *${complejo?.nombre || 'Ópalo Nails Spa'}* no pudo validar tu comprobante de pago (${motivo || 'pago no recibido en la cuenta bancaria'}).\n\n` +
+        `El turno con *${cancha.nombre}* ha sido liberado. Si consideras que se trata de un error, por favor comunícate directamente con nosotras. 💛✨`;
+
+      await enviarMensajeWhatsApp(
+        cliente.telefono_wa,
+        mensajeRechazo,
+        complejo?.whatsapp_token,
+        complejo?.whatsapp_phone_number_id
+      );
+    }
+
+    res.json({ success: true, reserva: reservaActualizada });
+  } catch (error: any) {
+    console.error('Error rechazando anticipo:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==============================================================================
+// 4. ENDPOINTS RESERVAS WEB SPA (ÓPALO NAILS SPA - UÑAS, CEJAS Y PESTAÑAS)
+// ==============================================================================
+
+const SERVICIOS_OPALO_NAILS = [
+  // --- CEJAS Y PESTAÑAS ---
+  {
+    id: 1,
+    nombre: 'Depilación con cera',
+    categoria: 'Cejas y Pestañas',
+    duracion: 30,
+    precio: 15000,
+    descripcion: 'Diseño y depilación de cejas con cera tibia hipoalergénica para un acabado limpio y definido.'
+  },
+  {
+    id: 2,
+    nombre: 'Depilación con hilo',
+    categoria: 'Cejas y Pestañas',
+    duracion: 30,
+    precio: 20000,
+    descripcion: 'Diseño y depilación de cejas con técnica hindú en hilo, ideal para pieles sensibles y máxima precisión.'
+  },
+  {
+    id: 3,
+    nombre: 'Henna',
+    categoria: 'Cejas y Pestañas',
+    duracion: 30,
+    precio: 8000,
+    descripcion: 'Sombreado semipermanente con pigmento de henna para rellenar y definir el marco de tus cejas.'
+  },
+  {
+    id: 4,
+    nombre: 'Cera y henna',
+    categoria: 'Cejas y Pestañas',
+    duracion: 45,
+    precio: 22000,
+    descripcion: 'Combo de diseño de cejas con cera más pigmentación en henna para una mirada expresiva.'
+  },
+  {
+    id: 5,
+    nombre: 'Hilo y henna',
+    categoria: 'Cejas y Pestañas',
+    duracion: 45,
+    precio: 16000,
+    descripcion: 'Combo de depilación de cejas con hilo más sombreado en henna con definición natural.'
+  },
+  {
+    id: 6,
+    nombre: 'Bigote con cera',
+    categoria: 'Cejas y Pestañas',
+    duracion: 20,
+    precio: 8000,
+    descripcion: 'Depilación delicada de bozo con cera suave para piel sensible.'
+  },
+  {
+    id: 7,
+    nombre: 'Bigote con hilo',
+    categoria: 'Cejas y Pestañas',
+    duracion: 20,
+    precio: 10000,
+    descripcion: 'Depilación de bozo con técnica de hilo sin irritación.'
+  },
+  {
+    id: 8,
+    nombre: 'Laminado de cejas',
+    categoria: 'Cejas y Pestañas',
+    duracion: 60,
+    precio: 55000,
+    descripcion: 'Alisado, diseño y fijación direccional de cejas con hidratación profunda para un efecto orgánico y poblado.'
+  },
+  {
+    id: 9,
+    nombre: 'Lifting de pestañas',
+    categoria: 'Cejas y Pestañas',
+    duracion: 60,
+    precio: 55000,
+    descripcion: 'Realce y curvatura natural para tus pestañas con nutrición e hidratación profunda.'
+  },
+  {
+    id: 10,
+    nombre: 'Pestañas pelo a pelo clásicas',
+    categoria: 'Cejas y Pestañas',
+    duracion: 120,
+    precio: 80000,
+    descripcion: 'Extensión de pestañas técnica clásica pelo a pelo con efecto natural y elegante. (Retoque $40.000; pasados los 20 días tiene adicional de $5.000 a $10.000).'
+  },
+  {
+    id: 11,
+    nombre: 'Pestañas pelo a pelo efecto pestañina',
+    categoria: 'Cejas y Pestañas',
+    duracion: 120,
+    precio: 80000,
+    descripcion: 'Extensión de pestañas con textura y definición tipo rímel para una mirada más intensa. (Retoque $45.000; pasados los 20 días tiene adicional de $5.000 a $10.000).'
+  },
+  {
+    id: 12,
+    nombre: 'Pestañas híbridas',
+    categoria: 'Cejas y Pestañas',
+    duracion: 120,
+    precio: 100000,
+    descripcion: 'Combinación perfecta entre técnica clásica y abanicos de volumen para mayor densidad. (Retoque $50.000; pasados los 20 días tiene adicional de $5.000 a $10.000).'
+  },
+  {
+    id: 13,
+    nombre: 'Pestañas 3D',
+    categoria: 'Cejas y Pestañas',
+    duracion: 120,
+    precio: 100000,
+    descripcion: 'Abanicos ligeros 3D que aportan volumen, suavidad y plenitud a tu mirada. (Retoque $50.000; pasados los 20 días tiene adicional de $5.000 a $10.000).'
+  },
+  {
+    id: 14,
+    nombre: 'Pestañas pelo a pelo volumen ruso',
+    categoria: 'Cejas y Pestañas',
+    duracion: 150,
+    precio: 110000,
+    descripcion: 'Máxima densidad y dramatismo con abanicos artesanales ultra ligeros de volumen ruso. (Retoque $60.000; pasados los 20 días tiene adicional de $5.000 a $10.000).'
+  },
+  {
+    id: 15,
+    nombre: 'Pestañas pelo a pelo volumen brasileño',
+    categoria: 'Cejas y Pestañas',
+    duracion: 120,
+    precio: 90000,
+    descripcion: 'Extensión con fibras en forma de Y que brindan excelente retención, ligereza y acabado tupido.'
+  },
+
+  // --- UÑAS TRADICIONAL Y SEMI ---
+  {
+    id: 16,
+    nombre: 'Limpieza',
+    categoria: 'Uñas Tradicional y Semi',
+    duracion: 40,
+    precio: 13000,
+    descripcion: 'Cuidado esencial de uñas: corte, limado, limpieza de cutícula e hidratación.'
+  },
+  {
+    id: 17,
+    nombre: 'Manicura tradicional',
+    categoria: 'Uñas Tradicional y Semi',
+    duracion: 60,
+    precio: 18000,
+    descripcion: 'Limpieza profunda de manos, arreglo de cutícula, exfoliación, hidratación y esmaltado tradicional.'
+  },
+  {
+    id: 18,
+    nombre: 'Pedicura tradicional',
+    categoria: 'Uñas Tradicional y Semi',
+    duracion: 60,
+    precio: 18000,
+    descripcion: 'Pedicure spa completo con limpieza profunda, exfoliación, masaje relajante y esmaltado tradicional.'
+  },
+  {
+    id: 19,
+    nombre: 'Manicura semipermanente full',
+    categoria: 'Uñas Tradicional y Semi',
+    duracion: 90,
+    precio: 46000,
+    descripcion: 'Manicura rusa/combinada con esmaltado semipermanente de larga duración y diseño incluido.'
+  },
+  {
+    id: 20,
+    nombre: 'Manicura solo tono',
+    categoria: 'Uñas Tradicional y Semi',
+    duracion: 75,
+    precio: 39000,
+    descripcion: 'Manicura con esmaltado semipermanente en tono liso uniforme y brillo espejo.'
+  },
+  {
+    id: 21,
+    nombre: 'Pedicura Semi',
+    categoria: 'Uñas Tradicional y Semi',
+    duracion: 80,
+    precio: 39000,
+    descripcion: 'Pedicure completo con esmaltado semipermanente de alta duración y secado inmediato en lámpara LED.'
+  },
+  {
+    id: 22,
+    nombre: 'Dipping + Semi',
+    categoria: 'Uñas Tradicional y Semi',
+    duracion: 90,
+    precio: 53000,
+    descripcion: 'Refuerzo en polvo de inmersión (Dipping) sobre uña natural finalizado con esmaltado semipermanente.'
+  },
+  {
+    id: 23,
+    nombre: 'Base Ruber',
+    categoria: 'Uñas Tradicional y Semi',
+    duracion: 90,
+    precio: 53000,
+    descripcion: 'Nivelación y refuerzo estructural con base rubber elástica para proteger y fortalecer la uña natural.'
+  },
+
+  // --- ACRÍLICO Y PRESS ON ---
+  {
+    id: 24,
+    nombre: 'Recubrimiento en acrílico',
+    categoria: 'Acrílico y Press On',
+    duracion: 120,
+    precio: 75000,
+    descripcion: 'Capa protectora de acrílico sobre el largo de tu uña natural con esmaltado semipermanente.'
+  },
+  {
+    id: 25,
+    nombre: 'Sistema Press On',
+    categoria: 'Acrílico y Press On',
+    duracion: 120,
+    precio: 75000,
+    descripcion: 'Extensión con tips soft gel de última generación, ligeros, resistentes y de acabado natural.'
+  },
+  {
+    id: 26,
+    nombre: 'Acrílicas con tip',
+    categoria: 'Acrílico y Press On',
+    duracion: 120,
+    precio: 90000,
+    descripcion: 'Extensión de uñas acrílicas con tip, estructura estilizada y esmaltado semipermanente.'
+  },
+  {
+    id: 27,
+    nombre: 'Acrílicas esculpidas',
+    categoria: 'Acrílico y Press On',
+    duracion: 150,
+    precio: 100000,
+    descripcion: 'Extensión artesanal en acrílico esculpido sobre molde, adaptada a la anatomía de tu uña.'
+  },
+  {
+    id: 28,
+    nombre: 'Retoque de acrílico o Press On',
+    categoria: 'Acrílico y Press On',
+    duracion: 120,
+    precio: 65000,
+    descripcion: 'Mantenimiento y nivelación de crecimiento. Incluye reparación de 1 uña perdida (adicional: con tip $6.000, esculpida $8.000).'
+  },
+
+  // --- RETIROS Y ADICIONALES ---
+  {
+    id: 29,
+    nombre: 'Retiro de acrílico definitivo',
+    categoria: 'Retiros y Adicionales',
+    duracion: 60,
+    precio: 15000,
+    descripcion: 'Retiro seguro y profesional de sistema acrílico cuidando las capas de tu uña natural.'
+  },
+  {
+    id: 30,
+    nombre: 'Retiro definitivo semipermanente',
+    categoria: 'Retiros y Adicionales',
+    duracion: 30,
+    precio: 8000,
+    descripcion: 'Retiro cuidadoso de esmaltado semipermanente con hidratación de cutícula.'
+  },
+  {
+    id: 31,
+    nombre: 'Uña en semipermanente',
+    categoria: 'Retiros y Adicionales',
+    duracion: 20,
+    precio: 4000,
+    descripcion: 'Arreglo o esmaltado individual de una uña en semipermanente.'
+  },
+  {
+    id: 32,
+    nombre: 'Uña Press On o recubrimiento',
+    categoria: 'Retiros y Adicionales',
+    duracion: 20,
+    precio: 7000,
+    descripcion: 'Reposición o recubrimiento individual de una uña en sistema Press On o acrílico sobre uña natural.'
+  },
+  {
+    id: 33,
+    nombre: 'Uña acrílica con tip',
+    categoria: 'Retiros y Adicionales',
+    duracion: 25,
+    precio: 8000,
+    descripcion: 'Reposición individual de una uña acrílica con tip.'
+  },
+  {
+    id: 34,
+    nombre: 'Uña esculpida',
+    categoria: 'Retiros y Adicionales',
+    duracion: 30,
+    precio: 10000,
+    descripcion: 'Reconstrucción o extensión individual de una uña en acrílico esculpido.'
+  }
+];
+
+// Obtener info del spa, empleadas y catálogo de servicios
+app.get('/api/spa/info', async (req: Request, res: Response) => {
+  try {
+    let complejo = await obtenerComplejoSpa();
+
+    if (!complejo) {
+      complejo = await BookingService.crearComplejo({
+        nombre: 'Ópalo Nails Spa',
+        slug: 'opalo-nails',
+        tipo_negocio: 'belleza_unas',
+        direccion: 'Pereira, Risaralda · Spa de Uñas, Cejas y Pestañas',
+        ciudad: 'Pereira',
+        telefono_whatsapp: '573000000000',
+        hora_apertura: '09:00:00',
+        hora_cierre: '18:00:00',
+        porcentaje_anticipo_minimo: 0,
+      });
+    }
+
+    const { data: canchas } = await supabase
+      .from('canchas')
+      .select('id, nombre, deporte, activa, precio_estandar, precio_pico')
+      .eq('complejo_id', complejo.id)
+      .eq('activa', true)
+      .order('nombre');
+
+    const montoFijo = getMontoAnticipoFijo(complejo);
+    const config = {
+      exigeAnticipo: (complejo.porcentaje_anticipo_minimo || 0) > 0,
+      montoAnticipoFijo: montoFijo,
+      porcentajeAnticipo: montoFijo,
+      nequiNumero: complejo.nequi_numero || 'Pendiente por configurar',
+      bancolombiaNumero: complejo.daviplata_numero || 'Pendiente por configurar',
+      titularCuenta: complejo.titular_cuenta || 'Ópalo Nails Spa',
+      horaApertura: complejo.hora_apertura ? complejo.hora_apertura.slice(0, 5) : '08:00',
+      horaCierre: complejo.hora_cierre ? complejo.hora_cierre.slice(0, 5) : '19:00',
+    };
+
+    const equipoEnriquecido = (canchas || []).map(enriquecerCancha);
+    const bootstrapData = {
+      complejo,
+      equipo: equipoEnriquecido,
+      config,
+      servicios: SERVICIOS_OPALO_NAILS,
+      categorias: ['Todos', 'Cejas y Pestañas', 'Uñas Tradicional y Semi', 'Acrílico y Press On', 'Retiros y Adicionales']
+    };
+
+    res.json(bootstrapData);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint alias bootstrap para inicialización ultrarrápida de la web en 1 solo viaje de red
+app.get('/api/spa/bootstrap', (req: Request, res: Response) => {
+  // Redirigir limpiamente a /api/spa/info que contiene todo el bootstrap paquetizado
+  res.redirect(307, '/api/spa/info');
+});
+
+// Obtener horarios (slots) disponibles para una fecha y duración específica
+app.get('/api/spa/slots', async (req: Request, res: Response) => {
+  const { date, cancha_id, duracion_minutos } = req.query;
+  const cleanDate = sanitizeInput(date, 10);
+  if (!cleanDate || !esFormatoFechaValido(cleanDate)) {
+    return res.status(400).json({ error: 'Parámetro date inválido o ausente (se espera YYYY-MM-DD)' });
+  }
+
+  if (cancha_id && !esUUIDValido(String(cancha_id))) {
+    return res.status(400).json({ error: 'ID de especialista inválido' });
+  }
+
+  try {
+    const duracion = Math.max(15, Math.min(360, parseInt(String(duracion_minutos || 45), 10)));
+    const fechaObj = new Date(`${cleanDate}T12:00:00-05:00`);
+    const diaSemana = fechaObj.getDay(); // 0 = Domingo
+
+    if (diaSemana === 0) {
+      return res.json({
+        date: cleanDate,
+        slots: [],
+        aviso: 'Los domingos estamos cerrados. Atendemos con cariño de Lunes a Sábado ✨🌿',
+      });
+    }
+
+    const complejo = await obtenerComplejoSpa();
+    if (!complejo) return res.status(404).json({ error: 'Spa no configurado' });
+
+    const { data: empleadas } = await supabase
+      .from('canchas')
+      .select('id, nombre')
+      .eq('complejo_id', complejo.id)
+      .eq('activa', true);
+
+    const listaEmpleadas = (empleadas || []).map(enriquecerCancha);
+    if (listaEmpleadas.length === 0) return res.json({ date, slots: [] });
+
+    const aperturaStr = complejo.hora_apertura ? complejo.hora_apertura.slice(0, 5) : '08:00';
+    const cierreStr = complejo.hora_cierre ? complejo.hora_cierre.slice(0, 5) : '19:00';
+
+    // Generar franjas base cada 30 minutos desde apertura hasta cierre
+    const [aperH, aperM] = aperturaStr.split(':').map(Number);
+    const [cierH, cierM] = cierreStr.split(':').map(Number);
+    const startTotalMin = aperH * 60 + aperM;
+    const endTotalMin = cierH * 60 + cierM;
+
+    const horasBase: string[] = [];
+    for (let m = startTotalMin; m < endTotalMin; m += 30) {
+      const hh = String(Math.floor(m / 60)).padStart(2, '0');
+      const mm = String(m % 60).padStart(2, '0');
+      horasBase.push(`${hh}:${mm}`);
+    }
+
+    const inicioBuffer = new Date(new Date(`${date}T00:00:00-05:00`).getTime() - 6 * 60 * 60 * 1000).toISOString();
+    const finBuffer = new Date(new Date(`${date}T23:59:59-05:00`).getTime() + 6 * 60 * 60 * 1000).toISOString();
+
+    const { data: reservasOcupadas } = await supabase
+      .from('reservas')
+      .select('cancha_id, fecha_inicio, fecha_fin, estado')
+      .in('cancha_id', listaEmpleadas.map(e => e.id))
+      .neq('estado', 'cancelada')
+      .gte('fecha_inicio', inicioBuffer)
+      .lte('fecha_inicio', finBuffer);
+
+    const ocupadas = reservasOcupadas || [];
+    const ahoraMs = Date.now();
+    const horaCierreMs = new Date(`${date}T${cierreStr}:00-05:00`).getTime();
+    const horaAperturaMs = new Date(`${date}T${aperturaStr}:00-05:00`).getTime();
+
+    // Candidatos dinámicos: horas base + puntos exactos donde terminan citas previas de ese día
+    const candidatosSet = new Set<string>(horasBase);
+
+    for (const r of ocupadas) {
+      if (r.fecha_fin) {
+        try {
+          const dFin = new Date(r.fecha_fin);
+          const hhmmFin = dFin.toLocaleTimeString('es-CO', {
+            timeZone: 'America/Bogota',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          });
+          const finMs = new Date(`${date}T${hhmmFin}:00-05:00`).getTime();
+          if (finMs >= horaAperturaMs && finMs < horaCierreMs) {
+            candidatosSet.add(hhmmFin);
+          }
+        } catch {
+          // Ignorar fecha inválida
+        }
+      }
+    }
+
+    const candidatosOrdenados = Array.from(candidatosSet).sort();
+    const slotsDisponibles: string[] = [];
+
+    for (const h of candidatosOrdenados) {
+      const slotStartMs = new Date(`${date}T${h}:00-05:00`).getTime();
+      const slotEndMs = slotStartMs + duracion * 60 * 1000;
+
+      // Si la fecha es hoy y la hora ya pasó, no se puede agendar
+      if (slotStartMs <= ahoraMs) {
+        continue;
+      }
+
+      // Si el servicio termina después de la hora de cierre del local, descartar
+      if (slotEndMs > horaCierreMs) {
+        continue;
+      }
+
+      // Verificar qué especialistas están libres sin solapamiento
+      const manicuristasOcupadas = ocupadas
+        .filter(r => {
+          const rStart = new Date(r.fecha_inicio).getTime();
+          const rEnd = new Date(r.fecha_fin).getTime();
+          return rStart < slotEndMs && rEnd > slotStartMs;
+        })
+        .map(r => r.cancha_id);
+
+      if (cancha_id) {
+        const estaOcupada = manicuristasOcupadas.includes(cancha_id as string);
+        if (!estaOcupada) {
+          slotsDisponibles.push(h);
+        }
+      } else {
+        const hayLibre = listaEmpleadas.some(e => !manicuristasOcupadas.includes(e.id));
+        if (hayLibre) {
+          slotsDisponibles.push(h);
+        }
+      }
+    }
+
+    res.json({
+      date,
+      duracion_minutos: duracion,
+      slots: slotsDisponibles,
+      aviso: slotsDisponibles.length === 0 ? 'No hay horarios disponibles para esta fecha con la duración de este servicio. Prueba con otro día ✨🌿' : undefined
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Confirmar reserva web (100% directa o con anticipo según fecha/config) con Voucher y prevención de duplicados
+app.post('/api/spa/reservar', bookingLimiter, async (req: Request, res: Response) => {
+  let {
+    servicio_nombre,
+    precio,
+    duracion_minutos = 60,
+    fecha,
+    hora,
+    cancha_id,
+    cliente_nombre,
+    cliente_telefono,
+    reagendar_reserva_id
+  } = req.body;
+
+  // Sanitización y normalización defensiva contra XSS y desbordamientos
+  cliente_nombre = sanitizeInput(cliente_nombre, 80);
+  servicio_nombre = sanitizeInput(servicio_nombre, 250);
+  fecha = sanitizeInput(fecha, 10);
+  hora = sanitizeInput(hora, 5);
+  cliente_telefono = String(cliente_telefono || '').replace(/\D/g, '').slice(0, 15);
+
+  if (!fecha || !hora || !cliente_telefono || !cliente_nombre) {
+    return res.status(400).json({ error: 'Faltan datos requeridos (fecha, hora, nombre, teléfono)' });
+  }
+
+  if (!esFormatoFechaValido(fecha)) {
+    return res.status(400).json({ error: 'Formato de fecha inválido. Se espera YYYY-MM-DD.' });
+  }
+
+  if (!esFormatoHoraValido(hora)) {
+    return res.status(400).json({ error: 'Formato de hora inválido. Se espera HH:MM.' });
+  }
+
+  if (cancha_id && !esUUIDValido(cancha_id)) {
+    return res.status(400).json({ error: 'ID de especialista inválido.' });
+  }
+
+  if (reagendar_reserva_id && !esUUIDValido(reagendar_reserva_id)) {
+    return res.status(400).json({ error: 'ID de reserva a reagendar inválido.' });
+  }
+
+  try {
+    const complejo = await obtenerComplejoSpa();
+    if (!complejo) throw new Error('Spa no encontrado');
+
+    const { data: empleadas } = await supabase
+      .from('canchas')
+      .select('*')
+      .eq('complejo_id', complejo.id)
+      .eq('activa', true);
+
+    const listaEmpleadas = (empleadas || []).map(enriquecerCancha);
+    if (listaEmpleadas.length === 0) {
+      return res.status(400).json({ error: 'No hay personal registrado en el spa' });
+    }
+
+    const dInicio = new Date(`${fecha}T${hora}:00-05:00`);
+    const dFin = new Date(dInicio.getTime() + (Number(duracion_minutos) || 60) * 60 * 1000);
+
+    // 1. Validar que la hora no esté en el pasado
+    if (dInicio.getTime() <= Date.now()) {
+      return res.status(400).json({ error: 'No puedes reservar un horario que ya pasó.' });
+    }
+
+    // 2. Buscar reservas activas solapadas en esta franja para evitar duplicados (excluyendo cita anterior si es reagendamiento)
+    const { data: reservasSolapadas } = await supabase
+      .from('reservas')
+      .select('id, cancha_id, fecha_inicio, fecha_fin')
+      .in('cancha_id', listaEmpleadas.map(e => e.id))
+      .neq('estado', 'cancelada')
+      .lt('fecha_inicio', dFin.toISOString())
+      .gt('fecha_fin', dInicio.toISOString());
+
+    const ocupadasIds = (reservasSolapadas || [])
+      .filter(r => !reagendar_reserva_id || r.id !== reagendar_reserva_id)
+      .map(r => r.cancha_id);
+
+    let empleadaAsignada: any;
+
+    if (cancha_id) {
+      if (ocupadasIds.includes(cancha_id)) {
+        return res.status(409).json({
+          error: 'La manicurista seleccionada ya tiene una cita agendada en este horario. Por favor elige otra hora o especialista.',
+        });
+      }
+      empleadaAsignada = enriquecerCancha(listaEmpleadas.find(e => e.id === cancha_id));
+      if (!empleadaAsignada) {
+        return res.status(404).json({ error: 'Especialista no encontrada' });
+      }
+    } else {
+      // Asignar automáticamente una manicurista libre
+      const disponibles = listaEmpleadas.filter(e => !ocupadasIds.includes(e.id));
+      if (disponibles.length === 0) {
+        return res.status(409).json({
+          error: 'Lo sentimos, todos los turnos para este horario ya fueron reservados. Por favor selecciona otro horario.',
+        });
+      }
+      empleadaAsignada = enriquecerCancha(disponibles[0]);
+    }
+
+    // Normalizar teléfono celular (formato Colombia: 573...)
+    let cleanPhone = String(cliente_telefono).replace(/\D/g, '');
+    if (cleanPhone.length === 10 && cleanPhone.startsWith('3')) {
+      cleanPhone = `57${cleanPhone}`;
+    }
+
+    const cliente = await BookingService.getOrCreateCliente(cleanPhone, cliente_nombre.trim());
+
+    // Determinar si el spa exige abono/anticipo para reservar (o si la cita es en diciembre, donde SIEMPRE se exige abono)
+    const exigeAnticipo = requiereAnticipoParaFecha(complejo, fecha);
+    const montoFijoConfigurado = getMontoAnticipoFijo(complejo);
+
+    // Si es reagendamiento, buscar cita previa para extraer abono ya pagado y servicio anterior
+    let reservaPrevia: any = null;
+    let abonoPrevioReconocido = 0;
+    let servicioPrevioNombre = '';
+
+    if (reagendar_reserva_id) {
+      try {
+        const { data: prev } = await supabase
+          .from('reservas')
+          .select('*, canchas(*), clientes(*)')
+          .eq('id', reagendar_reserva_id)
+          .maybeSingle();
+
+        if (prev) {
+          reservaPrevia = prev;
+          const matchSvc = (prev.notas || '').match(/Servicio:\s*([^|[\n]+)/i);
+          if (matchSvc && matchSvc[1]) servicioPrevioNombre = matchSvc[1].trim();
+
+          // 1. Consultar pagos_anticipos si ya tenía pago aprobado
+          const { data: pagos } = await supabase
+            .from('pagos_anticipos')
+            .select('monto')
+            .eq('reserva_id', reagendar_reserva_id)
+            .eq('estado', 'aprobado');
+
+          if (pagos && pagos.length > 0) {
+            abonoPrevioReconocido = pagos.reduce((acc, p) => acc + Number(p.monto || 0), 0);
+          }
+
+          // 2. Si no hay registro en pagos_anticipos, solo reconocer abono si la reserva estaba confirmada con valor_anticipo_requerido > 0
+          if (!abonoPrevioReconocido && prev.estado === 'confirmada' && Number(prev.valor_anticipo_requerido) > 0) {
+            abonoPrevioReconocido = Number(prev.valor_anticipo_requerido);
+          }
+
+          if (!abonoPrevioReconocido) {
+            const matchAbono = (prev.notas || '').match(/Abono previo transferido:\s*\$?([\d\.]+)/i) || (prev.notas || '').match(/ANTICIPO:\s*\$?([\d\.]+)/i);
+            if (matchAbono && matchAbono[1]) {
+              abonoPrevioReconocido = Number(matchAbono[1].replace(/\./g, '')) || 0;
+            }
+          }
+          // IMPORTANTE: Si la cita previa no pagó abono, abonoPrevioReconocido se mantiene en 0.
+        }
+      } catch (errPrev) {
+        console.warn('[REAGENDAMIENTO] Error consultando reserva previa:', errPrev);
+      }
+    }
+
+    const esReagendamiento = Boolean(reagendar_reserva_id && reservaPrevia);
+    const numPrecio = Number(precio || 35000);
+
+    // Calcular el anticipo total requerido para el servicio y fecha seleccionada
+    const anticipoTotalParaEsteTurno = exigeAnticipo ? Math.min(numPrecio, montoFijoConfigurado) : 0;
+
+    let anticipoCalculado = 0;
+    let saldoRestante = numPrecio;
+    let estadoInicial = 'confirmada';
+    let expiracionReserva: string | null = null;
+    let esPreReserva = false;
+
+    if (esReagendamiento) {
+      // Calcular si falta pagar anticipo (ejemplo: cita previa en noviembre sin abono y reagendada a diciembre)
+      const anticipoFaltante = Math.max(0, anticipoTotalParaEsteTurno - abonoPrevioReconocido);
+
+      if (anticipoFaltante > 0) {
+        // La nueva cita exige anticipo que no está cubierto: queda pendiente de pago (30 min)
+        anticipoCalculado = anticipoFaltante;
+        saldoRestante = Math.max(0, numPrecio - abonoPrevioReconocido - anticipoFaltante);
+        estadoInicial = 'pendiente_pago';
+        expiracionReserva = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+        esPreReserva = true;
+      } else {
+        // No hay anticipo faltante: se confirma de inmediato
+        anticipoCalculado = 0;
+        saldoRestante = Math.max(0, numPrecio - abonoPrevioReconocido);
+        estadoInicial = 'confirmada';
+        expiracionReserva = null;
+        esPreReserva = false;
+      }
+    } else {
+      // Cita nueva directa (no reagendamiento)
+      anticipoCalculado = anticipoTotalParaEsteTurno;
+      saldoRestante = Math.max(0, numPrecio - anticipoCalculado);
+      estadoInicial = exigeAnticipo ? 'pendiente_pago' : 'confirmada';
+      expiracionReserva = exigeAnticipo ? new Date(Date.now() + 30 * 60 * 1000).toISOString() : null;
+      esPreReserva = exigeAnticipo;
+    }
+
+    const precioFmt = '$' + numPrecio.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    const anticipoFmt = '$' + anticipoCalculado.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    const saldoRestanteFmt = '$' + saldoRestante.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+
+    let notas = '';
+    if (esReagendamiento) {
+      const detalleServicio = servicioPrevioNombre && servicioPrevioNombre.toLowerCase() !== String(servicio_nombre).toLowerCase()
+        ? `Cambio de servicio: "${servicioPrevioNombre}" -> "${servicio_nombre}"`
+        : `Mismo servicio: "${servicio_nombre}"`;
+
+      if (esPreReserva) {
+        notas = `💅 Servicio: ${servicio_nombre || 'Belleza'} | Clienta: ${cliente_nombre.trim()} | [CITA_REAGENDADA_PENDIENTE_ANTICIPO: ${anticipoFmt}] | ${detalleServicio}${abonoPrevioReconocido > 0 ? ` | Abono anterior: $${abonoPrevioReconocido.toLocaleString('es-CO')}` : ''} | Excedente en spa: $${saldoRestante.toLocaleString('es-CO')}`;
+      } else {
+        notas = `💅 Servicio: ${servicio_nombre || 'Belleza'} | Clienta: ${cliente_nombre.trim()} | [CITA_REAGENDADA_CONFIRMADA] | ${detalleServicio}${abonoPrevioReconocido > 0 ? ` | Abono previo transferido: $${abonoPrevioReconocido.toLocaleString('es-CO')}` : ''} | Excedente en spa: $${saldoRestante.toLocaleString('es-CO')} | [CONFIRMADA_POR_CLIENTA]`;
+      }
+    } else if (exigeAnticipo) {
+      notas = `💅 Servicio: ${servicio_nombre || 'Belleza'} | Clienta: ${cliente_nombre.trim()} | Pre-Reserva Web Ópalo Nails Spa | [PENDIENTE_ANTICIPO: ${anticipoFmt}]`;
+    } else {
+      notas = `💅 Servicio: ${servicio_nombre || 'Belleza'} | Clienta: ${cliente_nombre.trim()} | Reserva Web Ópalo Nails Spa | Pago en el spa (Sin cobro anticipado)`;
+    }
+
+    const { data: reserva, error: errRes } = await supabase
+      .from('reservas')
+      .insert({
+        cancha_id: empleadaAsignada.id,
+        cliente_id: cliente.id,
+        fecha_inicio: dInicio.toISOString(),
+        fecha_fin: dFin.toISOString(),
+        valor_total: numPrecio,
+        valor_anticipo_requerido: anticipoCalculado,
+        estado: estadoInicial,
+        expiracion_reserva: expiracionReserva,
+        notas,
+      })
+      .select('*, canchas(*), clientes(*)')
+      .single();
+
+    if (errRes) throw errRes;
+
+    // Si la reserva proviene de un flujo de reagendamiento, transferir auditoría de pagos y eliminar la anterior
+    if (esReagendamiento && reserva) {
+      try {
+        await supabase
+          .from('pagos_anticipos')
+          .update({ reserva_id: reserva.id })
+          .eq('reserva_id', reagendar_reserva_id);
+
+        console.log(`[REAGENDAMIENTO] Eliminando cita anterior ID: ${reagendar_reserva_id} tras procesar reagendamiento`);
+        await supabase
+          .from('reservas')
+          .delete()
+          .eq('id', reagendar_reserva_id);
+      } catch (delErr: any) {
+        console.warn(`[REAGENDAMIENTO] Error procesando limpieza de cita previa ${reagendar_reserva_id}:`, delErr.message);
+      }
+    }
+
+    const fechaLegible = dInicio.toLocaleDateString('es-CO', {
+      timeZone: 'America/Bogota',
+      weekday: 'long',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+
+    const horaInicioFmt = dInicio.toLocaleTimeString('es-CO', {
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: 'America/Bogota',
+    });
+
+    const horaFinFmt = dFin.toLocaleTimeString('es-CO', {
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: 'America/Bogota',
+    });
+
+    // Formulación del comprobante oficial / voucher de WhatsApp
+    let voucherWhatsApp = '';
+
+    if (esReagendamiento && esPreReserva) {
+      const detalleServicioInfo = servicioPrevioNombre && servicioPrevioNombre.toLowerCase() !== String(servicio_nombre).toLowerCase()
+        ? `✨ _(Cambiaste de ${servicioPrevioNombre} a ${servicio_nombre})_\n`
+        : '';
+
+      voucherWhatsApp =
+        `✨🌿 *ÓPALO NAILS SPA* 🌿✨\n` +
+        `_Pre-Reserva de Cita Reagendada (Temporada Diciembre)_\n` +
+        `───────────────\n\n` +
+        `¡Hola *${cliente_nombre.trim()}*! 💅 Tu solicitud de cambio de horario ha sido *pre-apartada temporalmente*:\n\n` +
+        `💅 *Servicio:* ${servicio_nombre}\n` +
+        detalleServicioInfo +
+        `👩‍🎨 *Especialista:* ${empleadaAsignada.nombre}\n` +
+        `📅 *Nueva Fecha:* ${fechaLegible}\n` +
+        `⏰ *Nuevo Horario:* ${horaInicioFmt} a ${horaFinFmt}\n` +
+        `⏱️ *Duración aprox:* ${duracion_minutos} min\n\n` +
+        `💰 *Valor del servicio:* ${precioFmt}\n` +
+        (abonoPrevioReconocido > 0
+          ? `💳 *Abono anterior reconocido:* $${abonoPrevioReconocido.toLocaleString('es-CO')}\n`
+          : '') +
+        `💳 *Anticipo a transferir:* *${anticipoFmt}*\n` +
+        `🏠 *Saldo restante en el spa:* ${saldoRestanteFmt}\n\n` +
+        `───────────────\n` +
+        `*CUENTAS PARA TRANSFERIR:*\n` +
+        `📲 *Nequi:* ${complejo.nequi_numero || 'Pendiente por configurar'}\n` +
+        `🏦 *Bancolombia:* ${complejo.daviplata_numero || 'Pendiente por configurar'}\n` +
+        `👤 *Titular:* ${complejo.titular_cuenta || 'Ópalo Nails Spa'}\n\n` +
+        `⏳ *TIEMPO LÍMITE (30 MINUTOS):*\n` +
+        `Para asegurar tu cupo en temporada de diciembre, por favor transfiere el abono de *${anticipoFmt}* y *envía el comprobante por este chat* dentro de los próximos 30 minutos.\n\n` +
+        `¡Quedamos atentas a tu comprobante hermosa! 💛✨`;
+    } else if (esReagendamiento) {
+      const detalleServicioInfo = servicioPrevioNombre && servicioPrevioNombre.toLowerCase() !== String(servicio_nombre).toLowerCase()
+        ? `✨ _(Cambiaste de ${servicioPrevioNombre} a ${servicio_nombre})_\n`
+        : '';
+
+      const lineaAbono = abonoPrevioReconocido > 0
+        ? `💳 *Abono anterior reconocido:* $${abonoPrevioReconocido.toLocaleString('es-CO')}\n🏠 *Excedente a pagar en el spa:* $${saldoRestante.toLocaleString('es-CO')}\n\n`
+        : `🏠 *Total a pagar en el spa:* ${precioFmt}\n\n`;
+
+      const lineaConfirmacion = abonoPrevioReconocido > 0
+        ? `✅ *Tu cupo está 100% CONFIRMADO.* Tu cita anterior fue cancelada y tu abono ya quedó aplicado.\n\n`
+        : `✅ *Tu cupo está 100% CONFIRMADO.* Tu cita anterior fue cancelada y tu nuevo horario quedó reservado.\n\n`;
+
+      voucherWhatsApp =
+        `✨🌿 *ÓPALO NAILS SPA* 🌿✨\n` +
+        `_Confirmación de Cita Reagendada_\n` +
+        `───────────────\n\n` +
+        `¡Hola *${cliente_nombre.trim()}*! 💅 Tu cita ha sido *reagendada y confirmada exitosamente*:\n\n` +
+        `💅 *Servicio:* ${servicio_nombre}\n` +
+        detalleServicioInfo +
+        `👩‍🎨 *Especialista:* ${empleadaAsignada.nombre}\n` +
+        `📅 *Nueva Fecha:* ${fechaLegible}\n` +
+        `⏰ *Nuevo Horario:* ${horaInicioFmt} a ${horaFinFmt}\n` +
+        `⏱️ *Duración aprox:* ${duracion_minutos} min\n\n` +
+        `💰 *Valor del servicio:* ${precioFmt}\n` +
+        lineaAbono +
+        `───────────────\n` +
+        `📍 *Ubicación:* ${complejo.direccion || 'Pereira, Risaralda'}\n` +
+        `📸 *Instagram:* @opalo_nailspereira\n` +
+        `🏢 *Lugar:* Ópalo Nails Spa - Uñas, Cejas y Pestañas\n\n` +
+        lineaConfirmacion +
+        `¡Te esperamos con todo el cariño para consentirte hermosa! 💛✨`;
+    } else if (exigeAnticipo) {
+      voucherWhatsApp =
+        `✨🌿 *ÓPALO NAILS SPA* 🌿✨\n` +
+        `_Pre-Reserva de Turno_\n` +
+        `───────────────\n\n` +
+        `¡Hola *${cliente_nombre.trim()}*! 💅 Tu turno ha sido *pre-apartado temporalmente*:\n\n` +
+        `💅 *Servicio:* ${servicio_nombre}\n` +
+        `👩‍🎨 *Especialista:* ${empleadaAsignada.nombre}\n` +
+        `📅 *Fecha:* ${fechaLegible}\n` +
+        `⏰ *Horario:* ${horaInicioFmt} a ${horaFinFmt}\n` +
+        `⏱️ *Duración aprox:* ${duracion_minutos} min\n\n` +
+        `💰 *Total del servicio:* ${precioFmt}\n` +
+        (saldoRestante === 0
+          ? `💳 *Valor a transferir (100% del servicio):* *${anticipoFmt}*\n` +
+            `🏠 *Saldo restante en el spa:* *$0* (¡Servicio cubierto!)\n\n`
+          : `💳 *Abono requerido:* *${anticipoFmt}*\n` +
+            `🏠 *Saldo restante en el spa:* ${saldoRestanteFmt}\n\n`) +
+        `───────────────\n` +
+        `*CUENTAS PARA TRANSFERIR:*\n` +
+        `📲 *Nequi:* ${complejo.nequi_numero || 'Pendiente por configurar'}\n` +
+        `🏦 *Bancolombia:* ${complejo.daviplata_numero || 'Pendiente por configurar'}\n` +
+        `👤 *Titular:* ${complejo.titular_cuenta || 'Ópalo Nails Spa'}\n\n` +
+        `⏳ *TIEMPO LÍMITE (30 MINUTOS):*\n` +
+        `Para asegurar tu cupo definitivo, por favor transfiere ${saldoRestante === 0 ? `el valor total de *${anticipoFmt}*` : `el abono de *${anticipoFmt}*`} y *envía la foto del comprobante por este mismo chat* dentro de los próximos 30 minutos.\n\n` +
+        `Pasado este tiempo, el espacio se liberará automáticamente para otra clienta.\n\n` +
+        `¡Quedamos atentas a tu comprobante hermosa! 💛✨`;
+    } else {
+      voucherWhatsApp =
+        `✨🌿 *ÓPALO NAILS SPA* 🌿✨\n` +
+        `_Comprobante de Cita_\n` +
+        `───────────────\n\n` +
+        `¡Hola *${cliente_nombre.trim()}*! 💅 Tu cita ha sido agendada con éxito:\n\n` +
+        `💅 *Servicio:* ${servicio_nombre}\n` +
+        `👩‍🎨 *Especialista:* ${empleadaAsignada.nombre}\n` +
+        `📅 *Fecha:* ${fechaLegible}\n` +
+        `⏰ *Horario:* ${horaInicioFmt} a ${horaFinFmt}\n` +
+        `⏱️ *Duración aprox:* ${duracion_minutos} min\n` +
+        `💰 *Valor a pagar:* ${precioFmt}\n\n` +
+        `📍 *Ubicación:* ${complejo.direccion || 'Pereira, Risaralda'}\n` +
+        `📸 *Instagram:* @opalo_nailspereira\n` +
+        `🏢 *Lugar:* Ópalo Nails Spa - Uñas, Cejas y Pestañas\n\n` +
+        `───────────────\n` +
+        `Si necesitas reprogramar o tienes alguna duda, puedes responder directamente a este mensaje.\n` +
+        `¡Nos vemos pronto para consentirte hermosa! 💛✨`;
+    }
+
+    let waEnviado = false;
+    try {
+      await enviarMensajeWhatsApp(
+        cleanPhone,
+        voucherWhatsApp,
+        complejo?.whatsapp_token,
+        complejo?.whatsapp_phone_number_id
+      );
+      waEnviado = true;
+    } catch (e: any) {
+      console.warn('No se pudo enviar WhatsApp inmediato:', e.message);
+    }
+
+    notificarCambioReservas('INSERT', { id: reserva.id });
+
+    res.status(201).json({
+      success: true,
+      reserva,
+      empleada: empleadaAsignada.nombre,
+      waEnviado,
+      voucher: voucherWhatsApp,
+      esPreReserva,
+      esReagendamiento,
+      abonoPrevio: abonoPrevioReconocido,
+      montoAnticipoFijo: montoFijoConfigurado,
+      anticipoRequerido: anticipoCalculado,
+      saldoRestante,
+      porcentajeAnticipo: montoFijoConfigurado,
+      nequiNumero: complejo.nequi_numero || 'Pendiente por configurar',
+      bancolombiaNumero: complejo.daviplata_numero || 'Pendiente por configurar',
+      titularCuenta: complejo.titular_cuenta || 'Ópalo Nails Spa',
+    });
+  } catch (error: any) {
+    console.error('Error creando reserva web en spa:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Métricas y Resumen Financiero filtradas por complejo
+app.get('/api/metricas', async (req: Request, res: Response) => {
+  try {
+    const { complejo_id } = req.query;
+    let query = supabase.from('reservas').select('estado, valor_total, valor_anticipo_requerido, canchas!inner(complejo_id)');
+
+    if (complejo_id) {
+      query = query.eq('canchas.complejo_id', complejo_id as string);
+    }
+
+    const { data: reservas, error } = await query;
+    if (error) throw error;
+
+    const totalReservas = reservas?.length || 0;
+    const confirmadas = reservas?.filter((r) => r.estado === 'confirmada' || r.estado === 'completada') || [];
+    const ingresosTotales = confirmadas.reduce((sum, r) => sum + Number(r.valor_total || 0), 0);
+    const anticiposRecaudados = confirmadas.reduce((sum, r) => sum + Number(r.valor_anticipo_requerido || 0), 0);
+
+    res.json({
+      total_reservas: totalReservas,
+      reservas_confirmadas: confirmadas.length,
+      ingresos_estimados: ingresosTotales,
+      anticipos_recaudados: anticiposRecaudados,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint de Keep-Alive y Salud para UptimeRobot / cron-job.org
+app.get(['/api/ping', '/api/health', '/health'], (req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    servicio: 'Ópalo Nails Spa - Backend 24/7',
+    uptime_segundos: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Tarea de recordatorios automáticos (admite GET y POST para cron jobs y keep-alive)
+app.all('/api/cron/recordatorios', async (req: Request, res: Response) => {
+  try {
+    const resultado = await ReminderService.procesarRecordatoriosProximos();
+    await BookingService.liberarReservasExpiradas();
+    res.json({ status: 'ok', keep_alive: true, timestamp: new Date().toISOString(), ...resultado });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Iniciar Servidor
+app.listen(PORT, async () => {
+  console.log(`🚀 Servidor de Ópalo Nails Spa ejecutándose en http://localhost:${PORT}`);
+  console.log(`📲 Vinculación de WhatsApp (QR) disponible en: http://localhost:${PORT}/qr`);
+  console.log(`💬 Simulador del Bot listo en: POST http://localhost:${PORT}/api/bot/simulate`);
+  console.log(`⏰ Cron Recordatorios listo en: POST http://localhost:${PORT}/api/cron/recordatorios`);
+
+  // Inicializar Baileys como proveedor único y exclusivo de WhatsApp
+  try {
+    await BaileysService.iniciar();
+  } catch (baileysErr) {
+    console.error('❌ Error iniciando servicio de Baileys:', baileysErr);
+  }
+
+  // Tarea periódica de recordatorios y limpieza de reservas expiradas
+  setInterval(async () => {
+    try {
+      await ReminderService.procesarRecordatoriosProximos();
+      await BookingService.liberarReservasExpiradas();
+    } catch (e) {
+      console.error('Error en tarea programada:', e);
+    }
+  }, 5 * 60 * 1000);
+
+  // Keep-alive anti-suspensión para Render (ping externo cada 4 minutos si existe RENDER_EXTERNAL_URL)
+  const renderUrl = (process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/$/, '');
+  if (renderUrl) {
+    setInterval(() => {
+      fetch(`${renderUrl}/api/baileys/diagnostico`).catch(() => {});
+    }, 4 * 60 * 1000);
+  }
+});
+
+// Manejo seguro de excepciones no controladas para evitar caídas del proceso
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ Advertencia: Unhandled Rejection detectada:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('❌ Error no capturado (uncaughtException):', error);
+});

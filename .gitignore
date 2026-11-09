@@ -1,0 +1,33 @@
+# Dependencias
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Compilados y cachés
+dist/
+backend/dist/
+frontend/dist/
+.vite/
+*.tsbuildinfo
+
+# Variables de entorno privadas (conservar los .env.example)
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Sesiones de WhatsApp (Baileys) - mantener carpeta vacía para nuevo QR
+baileys_auth_info/*
+!baileys_auth_info/.gitkeep
+backend/baileys_auth_info/*
+!backend/baileys_auth_info/.gitkeep
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+*.log
