@@ -1,9 +1,12 @@
-import { useState, useEffect, lazy, Suspense } from 'react';
+import { lazy, Suspense } from 'react';
 
-// Carga perezosa (Code-Splitting): Las clientas solo descargan la web de reservas, ahorrando ~600KB de código del Dashboard
-const OpaloNailsBooking = lazy(() =>
-  import('./components/OpaloNailsBooking').then((m) => ({ default: m.OpaloNailsBooking }))
-);
+/*
+ * Vista pública anterior de reservas/citas para clientas (preservada para integración futura):
+ * const OpaloNailsBooking = lazy(() =>
+ *   import('./components/OpaloNailsBooking').then((m) => ({ default: m.OpaloNailsBooking }))
+ * );
+ */
+
 const OpaloNailsDashboard = lazy(() =>
   import('./components/OpaloNailsDashboard').then((m) => ({ default: m.OpaloNailsDashboard }))
 );
@@ -16,54 +19,21 @@ function PantallaCarga({ mensaje }: { mensaje?: string }) {
         <span className="absolute text-xl">✨</span>
       </div>
       <p className="mt-4 text-xs font-bold tracking-wider text-[#2E5A44] uppercase animate-pulse">
-        {mensaje || 'Ópalo Nails Spa'}
+        {mensaje || 'Portal del Equipo & Administración · Ópalo Nails Spa'}
       </p>
     </div>
   );
 }
 
 export function App() {
-  const getRutaActual = () => {
-    const path = window.location.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
-    if (['admin', 'opalo-admin', 'dashboard', 'turnos', 'spa-dashboard'].includes(path)) {
-      return 'admin';
-    }
-    return 'reservas';
-  };
-
-  const [vista, setVista] = useState<'reservas' | 'admin'>(getRutaActual);
-
-  useEffect(() => {
-    const onPopState = () => {
-      setVista(getRutaActual());
-    };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, []);
-
-  const irAlAdmin = () => {
-    window.history.pushState(null, '', '/opalo-admin');
-    setVista('admin');
-  };
-
-  const irAReservas = () => {
-    window.history.pushState(null, '', '/');
-    setVista('reservas');
-  };
-
-  if (vista === 'admin') {
-    return (
-      <Suspense fallback={<PantallaCarga mensaje="Cargando Panel de Administración..." />}>
-        <OpaloNailsDashboard
-          onIrAWebReservas={irAReservas}
-        />
-      </Suspense>
-    );
-  }
-
+  /*
+   * Flujo de entrada directo: Carga directamente la pantalla de selección de perfil
+   * del portal del equipo & administración (1 Administradora y 4 Especialistas).
+   * La vista de reservas de clientas queda omitida/preservada arriba para integración futura.
+   */
   return (
-    <Suspense fallback={<PantallaCarga mensaje="Preparando tu experiencia de belleza en Ópalo Nails Spa..." />}>
-      <OpaloNailsBooking onIrAlAdmin={irAlAdmin} />
+    <Suspense fallback={<PantallaCarga mensaje="Cargando Portal de Ópalo Nails Spa..." />}>
+      <OpaloNailsDashboard />
     </Suspense>
   );
 }

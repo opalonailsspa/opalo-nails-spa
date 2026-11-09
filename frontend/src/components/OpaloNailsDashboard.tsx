@@ -87,10 +87,10 @@ const FOTOS_EQUIPO_ADMIN: Record<string, string> = {};
 
 const PERFILES_SPA_CONFIG: Omit<StaffProfile, 'canchaId'>[] = [
   {
-    id: 'admin-m1',
-    canchaNombreMatch: 'Especialista 1',
-    nombre: 'Especialista 1 (Administradora)',
-    alias: 'Especialista 1 (Admin & Especialista)',
+    id: 'admin',
+    canchaNombreMatch: '',
+    nombre: 'Administradora',
+    alias: 'Administradora (Supervisión & General)',
     rol: 'admin',
     pin: '1234',
     descripcion: 'Acceso Total: Supervisión de todas las tablas, métricas de reservas y agendamiento exclusivo.',
@@ -98,21 +98,32 @@ const PERFILES_SPA_CONFIG: Omit<StaffProfile, 'canchaId'>[] = [
     colorBadge: 'bg-[#E8F0E5] text-[#2E5A44] border-[#C5D6BE]',
   },
   {
-    id: 'admin-m2',
-    canchaNombreMatch: 'Especialista 2',
-    nombre: 'Especialista 2 (Administradora)',
-    alias: 'Especialista 2 (Admin & Especialista)',
-    rol: 'admin',
+    id: 'staff-m1',
+    canchaNombreMatch: 'Especialista 1',
+    nombre: 'Especialista 1',
+    alias: 'Especialista 1',
+    rol: 'manicurista',
     pin: '1234',
-    descripcion: 'Acceso Total: Supervisión de todas las tablas, métricas de reservas y agendamiento exclusivo.',
-    avatar: '👑',
-    colorBadge: 'bg-[#E8F0E5] text-[#2E5A44] border-[#C5D6BE]',
+    descripcion: 'Vista personal de turnos del día y gestión de atención de clientas asignadas.',
+    avatar: '✨',
+    colorBadge: 'bg-[#F5F8F4] text-[#C5A059] border-[#C5D6BE]',
+  },
+  {
+    id: 'staff-m2',
+    canchaNombreMatch: 'Especialista 2',
+    nombre: 'Especialista 2',
+    alias: 'Especialista 2',
+    rol: 'manicurista',
+    pin: '1234',
+    descripcion: 'Vista personal de turnos del día y gestión de atención de clientas asignadas.',
+    avatar: '🌸',
+    colorBadge: 'bg-[#F5F8F4] text-[#C5A059] border-[#C5D6BE]',
   },
   {
     id: 'staff-m3',
     canchaNombreMatch: 'Especialista 3',
     nombre: 'Especialista 3',
-    alias: 'Especialista 3 (Especialista)',
+    alias: 'Especialista 3',
     rol: 'manicurista',
     pin: '1234',
     descripcion: 'Vista personal de turnos del día y gestión de atención de clientas asignadas.',
@@ -123,7 +134,7 @@ const PERFILES_SPA_CONFIG: Omit<StaffProfile, 'canchaId'>[] = [
     id: 'staff-m4',
     canchaNombreMatch: 'Especialista 4',
     nombre: 'Especialista 4',
-    alias: 'Especialista 4 (Especialista)',
+    alias: 'Especialista 4',
     rol: 'manicurista',
     pin: '1234',
     descripcion: 'Vista personal de turnos del día y gestión de atención de clientas asignadas.',
@@ -132,8 +143,15 @@ const PERFILES_SPA_CONFIG: Omit<StaffProfile, 'canchaId'>[] = [
   },
 ];
 
+const CANCHAS_POR_DEFECTO: Cancha[] = [
+  { id: 'esp-1', nombre: 'Especialista 1', activa: true },
+  { id: 'esp-2', nombre: 'Especialista 2', activa: true },
+  { id: 'esp-3', nombre: 'Especialista 3', activa: true },
+  { id: 'esp-4', nombre: 'Especialista 4', activa: true },
+];
+
 interface Props {
-  onIrAWebReservas: () => void;
+  onIrAWebReservas?: () => void;
   complejoId?: string;
 }
 
@@ -262,10 +280,24 @@ function formatearHora12(hora24: number): string {
   return `${h12} ${periodo}`;
 }
 
+// Función para parsear fechas de forma segura en todos los navegadores (soporta espacio ' ' y 'T')
+function parsearFechaBogotaIso(isoStr: string): string {
+  if (!isoStr) return '';
+  try {
+    const s = isoStr.includes(' ') && !isoStr.includes('T') ? isoStr.replace(' ', 'T') : isoStr;
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  } catch {
+    return '';
+  }
+}
+
 // Funciones para calcular la hora en Colombia (America/Bogota, UTC-5)
 function obtenerHoraMinutosBogota(isoStr: string): string {
   try {
-    const d = new Date(isoStr);
+    const s = isoStr && isoStr.includes(' ') && !isoStr.includes('T') ? isoStr.replace(' ', 'T') : isoStr;
+    const d = new Date(s);
     if (isNaN(d.getTime())) return '08:00';
     return d.toLocaleTimeString('es-CO', {
       timeZone: 'America/Bogota',
@@ -278,12 +310,11 @@ function obtenerHoraMinutosBogota(isoStr: string): string {
   }
 }
 
-
-
 // Minutos desde la apertura en Colombia (por defecto horaBaseApertura = 8:00 AM)
 function obtenerMinutosDesdeAperturaBogota(isoStr: string, horaBaseApertura: number = 8): number {
   try {
-    const d = new Date(isoStr);
+    const s = isoStr && isoStr.includes(' ') && !isoStr.includes('T') ? isoStr.replace(' ', 'T') : isoStr;
+    const d = new Date(s);
     if (isNaN(d.getTime())) return 0;
     const horaStr = d.toLocaleTimeString('es-CO', {
       timeZone: 'America/Bogota',
@@ -292,7 +323,7 @@ function obtenerMinutosDesdeAperturaBogota(isoStr: string, horaBaseApertura: num
       hour12: false,
     });
     const [h, m] = horaStr.split(':').map((n) => parseInt(n, 10));
-    return (h - horaBaseApertura) * 60 + m;
+    return (h - horaBaseApertura) * 60 + (m || 0);
   } catch {
     return 0;
   }
@@ -441,7 +472,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
     return () => clearInterval(timer);
   }, []);
 
-  const [canchas, setCanchas] = useState<Cancha[]>([]);
+  const [canchas, setCanchas] = useState<Cancha[]>(CANCHAS_POR_DEFECTO);
   const [servicios, setServicios] = useState<Servicio[]>([]);
   const [reservas, setReservas] = useState<Reserva[]>([]);
   const [cargando, setCargando] = useState(false);
@@ -1060,7 +1091,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
         const d = await res.json();
         const idReal = d.complejo?.id || complejoId || '';
         setIdComplejoDetectado(idReal);
-        if (d.equipo) {
+        if (d.equipo && d.equipo.length > 0) {
           const normalizadas = d.equipo.map((c: any) => {
             let nombre = c.nombre;
             const nLower = nombre.trim().toLowerCase();
@@ -1073,7 +1104,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
           });
           setCanchas(normalizadas);
         }
-        if (d.servicios) setServicios(d.servicios);
+        if (d.servicios && d.servicios.length > 0) setServicios(d.servicios);
         if (d.config) {
           const montoFijo = Number(d.config.montoAnticipoFijo ?? d.config.porcentajeAnticipo) || 20000;
           setConfigAnticipo({
@@ -1088,9 +1119,60 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
           });
         }
         cargarReservas(idReal);
+        return;
       }
     } catch (e) {
-      console.error('Error cargando info spa:', e);
+      console.warn('API /api/spa/info no disponible, usando Supabase directo:', e);
+    }
+
+    // Fallback directo a Supabase
+    try {
+      const { data: comp } = await supabase.from('complejos').select('*').limit(1).maybeSingle();
+      if (comp) {
+        setIdComplejoDetectado(comp.id);
+        const montoFijo = Number(comp.monto_anticipo_fijo ?? comp.porcentaje_anticipo_minimo) || 20000;
+        setConfigAnticipo({
+          exigeAnticipo: Boolean(Number(comp.porcentaje_anticipo_minimo || 0) > 0),
+          montoAnticipoFijo: montoFijo,
+          porcentajeAnticipo: montoFijo,
+          nequiNumero: comp.nequi_numero || '',
+          bancolombiaNumero: comp.daviplata_numero || '',
+          titularCuenta: comp.titular_cuenta || 'Ópalo Nails Spa',
+          horaApertura: comp.hora_apertura ? comp.hora_apertura.slice(0, 5) : '08:00',
+          horaCierre: comp.hora_cierre ? comp.hora_cierre.slice(0, 5) : '19:00',
+        });
+      }
+
+      const { data: canchasDb } = await supabase
+        .from('canchas')
+        .select('*')
+        .order('nombre');
+
+      if (canchasDb && canchasDb.length > 0) {
+        const normalizadas = canchasDb.map((c: any) => {
+          let nombre = c.nombre;
+          const nLower = nombre.trim().toLowerCase();
+          if (nLower === '1' || nLower === 'manicurista 1') nombre = 'Especialista 1';
+          else if (nLower === '2' || nLower === 'manicurista 2') nombre = 'Especialista 2';
+          else if (nLower === '3' || nLower === 'manicurista 3') nombre = 'Especialista 3';
+          else if (nLower === '4' || nLower === 'manicurista 4') nombre = 'Especialista 4';
+          const foto = c.foto || FOTOS_EQUIPO_ADMIN[nombre.toLowerCase()] || null;
+          return { ...c, nombre, foto };
+        });
+        setCanchas(normalizadas);
+      }
+
+      const { data: serviciosDb } = await supabase
+        .from('servicios')
+        .select('*')
+        .order('orden');
+      if (serviciosDb && serviciosDb.length > 0) {
+        setServicios(serviciosDb);
+      }
+
+      cargarReservas(comp?.id);
+    } catch (sbErr) {
+      console.error('Error en fallback Supabase para info del spa:', sbErr);
     }
   };
 
@@ -1107,9 +1189,24 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
       if (res.ok) {
         const data = await res.json();
         setReservas(data || []);
+        return;
       }
     } catch (e) {
-      console.error('Error cargando reservas:', e);
+      console.warn('API /api/reservas no disponible o cargando, usando Supabase directo:', e);
+    }
+
+    // Fallback Supabase directo
+    try {
+      const { data, error } = await supabase
+        .from('reservas')
+        .select('*, canchas(id, nombre, deporte), clientes(nombre, telefono_wa), pagos_anticipos(*)')
+        .order('fecha_inicio', { ascending: true });
+
+      if (!error && data) {
+        setReservas(data as Reserva[]);
+      }
+    } catch (sbErr) {
+      console.error('Error cargando reservas desde Supabase:', sbErr);
     } finally {
       if (!silencioso) setCargando(false);
     }
@@ -1192,15 +1289,19 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
   // Sincronizar perfiles con IDs de las canchas en la BD
   const perfilesConIds: StaffProfile[] = useMemo(() => {
     return PERFILES_SPA_CONFIG.map((p) => {
+      // Para Administradora general, no necesita canchaId única (supervisa todas)
+      if (p.rol === 'admin') {
+        return { ...p, canchaId: undefined };
+      }
       const canchaEncontrada = canchas.find((c) => {
         const cLower = c.nombre.toLowerCase();
-        const pMatch = p.canchaNombreMatch.toLowerCase();
+        const pMatch = p.canchaNombreMatch ? p.canchaNombreMatch.toLowerCase() : '';
         return (
-          cLower.includes(pMatch) ||
-          (p.id === 'admin-m1' && cLower.includes('1')) ||
-          ((p.id === 'staff-m2' || p.id === 'admin-m2') && cLower.includes('2')) ||
-          (p.id === 'staff-m3' && cLower.includes('3')) ||
-          (p.id === 'staff-m4' && cLower.includes('4'))
+          (pMatch && cLower.includes(pMatch)) ||
+          (p.id.includes('m1') && (cLower.includes('1') || cLower.includes('uno'))) ||
+          (p.id.includes('m2') && (cLower.includes('2') || cLower.includes('dos'))) ||
+          (p.id.includes('m3') && (cLower.includes('3') || cLower.includes('tres'))) ||
+          (p.id.includes('m4') && (cLower.includes('4') || cLower.includes('cuatro')))
         );
       });
       return {
@@ -1216,8 +1317,10 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
       const match = perfilesConIds.find(
         (p) =>
           p.id === perfilActual.id ||
-          (perfilActual.id === 'staff-m2' && p.id === 'admin-m2') ||
-          p.canchaNombreMatch.toLowerCase() === perfilActual.canchaNombreMatch?.toLowerCase() ||
+          (perfilActual.rol === 'admin' && p.rol === 'admin') ||
+          (perfilActual.id === 'admin-m1' && p.id === 'admin') ||
+          (perfilActual.id === 'admin-m2' && p.id === 'staff-m2') ||
+          (p.canchaNombreMatch && perfilActual.canchaNombreMatch && p.canchaNombreMatch.toLowerCase() === perfilActual.canchaNombreMatch.toLowerCase()) ||
           p.nombre.toLowerCase().includes(perfilActual.nombre.toLowerCase().split(' ')[0])
       );
       if (match) {
@@ -1683,9 +1786,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
   const reservasDelDia = useMemo(() => {
     return reservas.filter((r) => {
       if (!r.fecha_inicio) return false;
-      const fechaCita = new Date(r.fecha_inicio).toLocaleDateString('en-CA', {
-        timeZone: 'America/Bogota',
-      });
+      const fechaCita = parsearFechaBogotaIso(r.fecha_inicio);
       return fechaCita === fechaSeleccionada;
     });
   }, [reservas, fechaSeleccionada]);
@@ -1705,9 +1806,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
     const fechasSet = new Set(diasDeLaSemana.map((d) => d.fechaIso));
     return reservas.filter((r) => {
       if (!r.fecha_inicio) return false;
-      const fechaCita = new Date(r.fecha_inicio).toLocaleDateString('en-CA', {
-        timeZone: 'America/Bogota',
-      });
+      const fechaCita = parsearFechaBogotaIso(r.fecha_inicio);
       return fechasSet.has(fechaCita);
     });
   }, [reservas, diasDeLaSemana]);
@@ -1725,9 +1824,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
     return reservas.filter((r) => {
       if (!r.fecha_inicio) return false;
       if (r.estado === 'bloqueada') return false;
-      const fechaCita = new Date(r.fecha_inicio).toLocaleDateString('en-CA', {
-        timeZone: 'America/Bogota',
-      }); // formato 'YYYY-MM-DD'
+      const fechaCita = parsearFechaBogotaIso(r.fecha_inicio);
       if (modoMetricas === 'dia') {
         return fechaCita === fechaSeleccionada;
       } else if (modoMetricas === 'semana') {
@@ -1912,7 +2009,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
   }, [reservasFiltradasMetricas, canchas, servicios]);
 
   // ============================================================================
-  // VISTA 1: PANTALLA DE LOGIN CON LOS 4 PERFILES
+  // VISTA 1: PANTALLA DE LOGIN CON 1 ADMINISTRADORA Y 4 ESPECIALISTAS
   // ============================================================================
   if (!perfilActual) {
     return (
@@ -1942,12 +2039,12 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                 Ópalo <span className="italic text-[#2E5A44]">Nails Spa</span>
               </h1>
               <p className="text-xs sm:text-sm text-[#5A6B60] max-w-md mx-auto mt-1">
-                Selecciona tu perfil de manicurista o administración para ver tu agenda de turnos.
+                Selecciona tu perfil de especialista o administración para ver tu agenda de turnos.
               </p>
             </div>
           </div>
 
-          {/* Tarjetas de Selección de los 4 Perfiles */}
+          {/* Tarjetas de Selección: 1 Administradora + 4 Especialistas */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-left">
             {perfilesConIds.map((p) => {
               const esPAdmin = p.rol === 'admin';
@@ -1959,7 +2056,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                   onClick={() => handleIniciarSesion(p)}
                   className={`bg-white rounded-2xl p-4 border transition-all cursor-pointer shadow-xs hover:shadow-md flex flex-col justify-between ${
                     esPAdmin
-                      ? 'border-[#2E5A44]/40 hover:border-[#2E5A44] bg-gradient-to-br from-white to-[#F5F8F4]'
+                      ? 'sm:col-span-2 border-[#2E5A44]/50 hover:border-[#2E5A44] bg-gradient-to-br from-white via-[#F5F8F4] to-[#E8F0E5]/60 ring-1 ring-[#2E5A44]/20'
                       : 'border-[#C5D6BE] hover:border-[#C5A059]'
                   }`}
                 >
@@ -1973,7 +2070,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                         )}
                       </div>
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${p.colorBadge}`}>
-                        {esPAdmin ? 'Administradora' : 'Manicurista'}
+                        {esPAdmin ? 'Administradora' : 'Especialista'}
                       </span>
                     </div>
 
@@ -1996,16 +2093,18 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
             })}
           </div>
 
-          {/* Botón Volver a la web pública */}
-          <div className="pt-2">
-            <button
-              onClick={onIrAWebReservas}
-              className="inline-flex items-center gap-1.5 text-xs text-[#5A6B60] hover:text-[#2E5A44] font-medium transition cursor-pointer"
-            >
-              <IconArrowLeft className="w-3.5 h-3.5" />
-              <span>Volver a la página web de reservas públicas</span>
-            </button>
-          </div>
+          {/* Botón Volver a la web pública (solo si está disponible) */}
+          {onIrAWebReservas && (
+            <div className="pt-2">
+              <button
+                onClick={onIrAWebReservas}
+                className="inline-flex items-center gap-1.5 text-xs text-[#5A6B60] hover:text-[#2E5A44] font-medium transition cursor-pointer"
+              >
+                <IconArrowLeft className="w-3.5 h-3.5" />
+                <span>Volver a la página web de reservas públicas</span>
+              </button>
+            </div>
+          )}
         </motion.div>
 
         {/* Modal PIN de Ingreso */}
@@ -2980,14 +3079,16 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                   <IconRefresh className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${cargando ? 'animate-spin' : ''}`} />
                 </button>
 
-                {/* Volver a la página principal */}
-                <button
-                  onClick={onIrAWebReservas}
-                  className="p-1.5 sm:p-2 rounded-xl border border-[#C5D6BE] hover:bg-[#E8F0E5] text-[#5A6B60] hover:text-[#2E5A44] transition cursor-pointer"
-                  title="Volver a la página principal (Reservas de clientas)"
-                >
-                  <IconExternalLink className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                </button>
+                {/* Volver a la página principal (solo si está configurada) */}
+                {onIrAWebReservas && (
+                  <button
+                    onClick={onIrAWebReservas}
+                    className="p-1.5 sm:p-2 rounded-xl border border-[#C5D6BE] hover:bg-[#E8F0E5] text-[#5A6B60] hover:text-[#2E5A44] transition cursor-pointer"
+                    title="Volver a la página principal (Reservas de clientas)"
+                  >
+                    <IconExternalLink className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                  </button>
+                )}
 
                 {/* Salir */}
                 <button
@@ -3371,8 +3472,13 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
               /* TABLAS EN 4 COLUMNAS (1 POR CADA MANICURISTA) */
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {canchas.map((cancha, idx) => {
-                const citasCancha = reservasDelDia.filter((r) => r.cancha_id === cancha.id && r.estado !== 'cancelada');
-                const esColumnaAdmin = idx < 2 || cancha.nombre.toLowerCase().includes('especialista 1') || cancha.nombre.toLowerCase().includes('especialista 2');
+                const citasCancha = reservasDelDia.filter(
+                  (r) =>
+                    (r.cancha_id === cancha.id ||
+                      r.canchas?.id === cancha.id ||
+                      (r.canchas?.nombre && r.canchas.nombre.toLowerCase().includes(cancha.nombre.toLowerCase()))) &&
+                    r.estado !== 'cancelada'
+                );
 
                 return (
                   <div
@@ -3386,7 +3492,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                           {cancha.foto || FOTOS_EQUIPO_ADMIN[cancha.nombre.toLowerCase()] ? (
                             <img src={cancha.foto || FOTOS_EQUIPO_ADMIN[cancha.nombre.toLowerCase()]} alt={cancha.nombre} className="w-full h-full object-cover" />
                           ) : (
-                            <span>{esColumnaAdmin ? '👑' : `E${idx + 1}`}</span>
+                            <span>{idx === 0 ? '✨' : idx === 1 ? '🌸' : idx === 2 ? '💅' : '🌿'}</span>
                           )}
                         </div>
                         <div>
@@ -3394,7 +3500,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                             {cancha.nombre}
                           </h3>
                           <span className="text-[10px] text-[#5A6B60]">
-                            {esColumnaAdmin ? 'Admin & Especialista' : 'Especialista'}
+                            Especialista
                           </span>
                         </div>
                       </div>
@@ -4061,52 +4167,98 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                   <IconLock className="w-3.5 h-3.5 stroke-[2.5]" />
                   <span>Bloquear Mi Horario</span>
                 </button>
-                <span className="text-xs font-bold text-[#2E5A44] bg-white px-3 py-2 rounded-xl border border-[#C5D6BE] shadow-2xs">
-                  {vistaAgenda === 'dia' ? (
-                    <>
-                      {citasClientesDelDia.filter((r) => r.cancha_id === perfilActual.canchaId).length} citas hoy
-                      {bloqueosDelDia.filter((r) => r.cancha_id === perfilActual.canchaId).length > 0 && (
-                        <span className="ml-1 text-amber-700 font-semibold">
-                          ({bloqueosDelDia.filter((r) => r.cancha_id === perfilActual.canchaId).length} bloq)
-                        </span>
+                {(() => {
+                  const effectiveCanchaId =
+                    perfilActual.canchaId ||
+                    canchas.find((c) =>
+                      c.nombre.toLowerCase().includes(perfilActual.nombre.toLowerCase())
+                    )?.id;
+
+                  const matchCanchaEspecialista = (r: Reserva) => {
+                    if (
+                      effectiveCanchaId &&
+                      (r.cancha_id === effectiveCanchaId || r.canchas?.id === effectiveCanchaId)
+                    ) {
+                      return true;
+                    }
+                    const matchNom = perfilActual.canchaNombreMatch || perfilActual.nombre;
+                    return Boolean(
+                      r.canchas?.nombre &&
+                        matchNom &&
+                        r.canchas.nombre.toLowerCase().includes(matchNom.toLowerCase())
+                    );
+                  };
+
+                  const citasHoy = citasClientesDelDia.filter(matchCanchaEspecialista).length;
+                  const bloqHoy = bloqueosDelDia.filter(matchCanchaEspecialista).length;
+                  const citasSem = citasClientesDeLaSemana.filter(matchCanchaEspecialista).length;
+                  const bloqSem = bloqueosDeLaSemana.filter(matchCanchaEspecialista).length;
+
+                  return (
+                    <span className="text-xs font-bold text-[#2E5A44] bg-white px-3 py-2 rounded-xl border border-[#C5D6BE] shadow-2xs">
+                      {vistaAgenda === 'dia' ? (
+                        <>
+                          {citasHoy} citas hoy
+                          {bloqHoy > 0 && (
+                            <span className="ml-1 text-amber-700 font-semibold">
+                              ({bloqHoy} bloq)
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          {citasSem} citas esta semana
+                          {bloqSem > 0 && (
+                            <span className="ml-1 text-amber-700 font-semibold">
+                              ({bloqSem} bloq)
+                            </span>
+                          )}
+                        </>
                       )}
-                    </>
-                  ) : (
-                    <>
-                      {citasClientesDeLaSemana.filter((r) => r.cancha_id === perfilActual.canchaId).length} citas esta semana
-                      {bloqueosDeLaSemana.filter((r) => r.cancha_id === perfilActual.canchaId).length > 0 && (
-                        <span className="ml-1 text-amber-700 font-semibold">
-                          ({bloqueosDeLaSemana.filter((r) => r.cancha_id === perfilActual.canchaId).length} bloq)
-                        </span>
-                      )}
-                    </>
-                  )}
-                </span>
+                    </span>
+                  );
+                })()}
               </div>
             </div>
 
             {/* VISTA SEGÚN MODO DÍA O SEMANA */}
-            {vistaAgenda === 'semana' ? (
-              renderVistaSemanal(
-                reservasDeLaSemana.filter((r) => r.cancha_id === perfilActual.canchaId && r.estado !== 'cancelada'),
-                false,
-                perfilActual.canchaId
-              )
-            ) : (
-              /* TIMELINE DIARIO CRONOLÓGICO DE LA MANICURISTA CON LÍNEA ROJA EN TIEMPO REAL */
-              (() => {
-                const misCitas = reservasDelDia.filter(
-                  (r) => r.cancha_id === perfilActual.canchaId && r.estado !== 'cancelada'
-                );
+            {(() => {
+              const effectiveCanchaId =
+                perfilActual.canchaId ||
+                canchas.find((c) =>
+                  c.nombre.toLowerCase().includes(perfilActual.nombre.toLowerCase())
+                )?.id;
 
-                return renderTimelineManicurista(
-                  misCitas,
-                  perfilActual.nombre,
-                  perfilActual.canchaId,
-                  false
+              const matchCanchaEspecialista = (r: Reserva) => {
+                if (
+                  effectiveCanchaId &&
+                  (r.cancha_id === effectiveCanchaId || r.canchas?.id === effectiveCanchaId)
+                ) {
+                  return true;
+                }
+                const matchNom = perfilActual.canchaNombreMatch || perfilActual.nombre;
+                return Boolean(
+                  r.canchas?.nombre &&
+                    matchNom &&
+                    r.canchas.nombre.toLowerCase().includes(matchNom.toLowerCase())
                 );
-              })()
-            )}
+              };
+
+              return vistaAgenda === 'semana' ? (
+                renderVistaSemanal(
+                  reservasDeLaSemana.filter((r) => matchCanchaEspecialista(r) && r.estado !== 'cancelada'),
+                  false,
+                  effectiveCanchaId
+                )
+              ) : (
+                renderTimelineManicurista(
+                  reservasDelDia.filter((r) => matchCanchaEspecialista(r) && r.estado !== 'cancelada'),
+                  perfilActual.nombre,
+                  effectiveCanchaId,
+                  false
+                )
+              );
+            })()}
 
             {/* Aviso de permisos */}
             <div className="bg-[#F5F8F4] border border-[#C5D6BE] rounded-xl p-3 text-xs text-[#5A6B60] text-center">
