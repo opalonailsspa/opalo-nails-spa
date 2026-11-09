@@ -280,11 +280,24 @@ function formatearHora12(hora24: number): string {
   return `${h12} ${periodo}`;
 }
 
-// Función para parsear fechas de forma segura en todos los navegadores (soporta espacio ' ' y 'T')
+// Función normalizadora para garantizar fechas válidas en Safari/móviles y zona horaria Colombia
+function normalizarIsoBogota(isoStr: string): string {
+  if (!isoStr) return '';
+  const trimmed = isoStr.trim();
+  let s = trimmed.includes(' ') && !trimmed.includes('T') ? trimmed.replace(' ', 'T') : trimmed;
+  if (!s.endsWith('Z') && !/[+-]\d{2}(:\d{2})?$/.test(s)) {
+    s += '-05:00';
+  }
+  return s;
+}
+
+// Función para parsear fechas de forma segura en todos los navegadores (evita desfases de UTC)
 function parsearFechaBogotaIso(isoStr: string): string {
   if (!isoStr) return '';
   try {
-    const s = isoStr.includes(' ') && !isoStr.includes('T') ? isoStr.replace(' ', 'T') : isoStr;
+    const trimmed = isoStr.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+    const s = normalizarIsoBogota(trimmed);
     const d = new Date(s);
     if (isNaN(d.getTime())) return '';
     return d.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
@@ -296,7 +309,8 @@ function parsearFechaBogotaIso(isoStr: string): string {
 // Funciones para calcular la hora en Colombia (America/Bogota, UTC-5)
 function obtenerHoraMinutosBogota(isoStr: string): string {
   try {
-    const s = isoStr && isoStr.includes(' ') && !isoStr.includes('T') ? isoStr.replace(' ', 'T') : isoStr;
+    if (!isoStr) return '08:00';
+    const s = normalizarIsoBogota(isoStr);
     const d = new Date(s);
     if (isNaN(d.getTime())) return '08:00';
     return d.toLocaleTimeString('es-CO', {
@@ -313,15 +327,7 @@ function obtenerHoraMinutosBogota(isoStr: string): string {
 // Minutos desde la apertura en Colombia (por defecto horaBaseApertura = 8:00 AM)
 function obtenerMinutosDesdeAperturaBogota(isoStr: string, horaBaseApertura: number = 8): number {
   try {
-    const s = isoStr && isoStr.includes(' ') && !isoStr.includes('T') ? isoStr.replace(' ', 'T') : isoStr;
-    const d = new Date(s);
-    if (isNaN(d.getTime())) return 0;
-    const horaStr = d.toLocaleTimeString('es-CO', {
-      timeZone: 'America/Bogota',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
+    const horaStr = obtenerHoraMinutosBogota(isoStr);
     const [h, m] = horaStr.split(':').map((n) => parseInt(n, 10));
     return (h - horaBaseApertura) * 60 + (m || 0);
   } catch {
@@ -333,13 +339,54 @@ function obtenerMinutosDesdeAperturaBogota(isoStr: string, horaBaseApertura: num
 function obtenerDuracionMinutosCita(inicioIso: string, finIso?: string): number {
   if (!finIso) return 45;
   try {
-    const tIni = new Date(inicioIso).getTime();
-    const tFin = new Date(finIso).getTime();
+    const tIni = new Date(normalizarIsoBogota(inicioIso)).getTime();
+    const tFin = new Date(normalizarIsoBogota(finIso)).getTime();
     if (isNaN(tIni) || isNaN(tFin) || tFin <= tIni) return 45;
     return Math.max(15, Math.round((tFin - tIni) / 60000));
   } catch {
     return 45;
   }
+}
+
+// Función robusta para vincular una cita/bloqueo con la especialista correspondiente
+function reservaCorrespondeACancha(
+  r: Reserva,
+  cancha: Cancha,
+  indiceCancha?: number
+): boolean {
+  if (!r) return false;
+  // 1. Coincidencia directa por ID
+  if (r.cancha_id && (r.cancha_id === cancha.id || r.canchas?.id === cancha.id)) {
+    return true;
+  }
+
+  // 2. Coincidencia por nombre normalizado (soporta 'Manicurista X' y 'Especialista X')
+  const nombreCancha = (cancha.nombre || '').toLowerCase();
+  const nombreReservaCancha = (r.canchas?.nombre || '').toLowerCase();
+
+  if (nombreReservaCancha && nombreCancha) {
+    if (
+      nombreReservaCancha === nombreCancha ||
+      nombreReservaCancha.includes(nombreCancha) ||
+      nombreCancha.includes(nombreReservaCancha)
+    ) {
+      return true;
+    }
+  }
+
+  // 3. Coincidencia por número de especialista / manicurista (1, 2, 3, 4)
+  const numCancha =
+    (nombreCancha.match(/\b([1-4])\b/) || [])[1] ||
+    (cancha.id.match(/([1-4])/) || [])[1] ||
+    (indiceCancha !== undefined && indiceCancha >= 0 && indiceCancha < 4 ? String(indiceCancha + 1) : null);
+
+  const numReserva = (nombreReservaCancha.match(/\b([1-4])\b/) || [])[1];
+
+  if (numCancha && numReserva && numCancha === numReserva) {
+    return true;
+  }
+
+  return false;
 }
 
 interface CitaPosicionada {
@@ -1091,8 +1138,9 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
         const d = await res.json();
         const idReal = d.complejo?.id || complejoId || '';
         setIdComplejoDetectado(idReal);
-        if (d.equipo && d.equipo.length > 0) {
-          const normalizadas = d.equipo.map((c: any) => {
+        const listaEquipo = d.equipo || d.canchas;
+        if (listaEquipo && listaEquipo.length > 0) {
+          const normalizadas = listaEquipo.map((c: any) => {
             let nombre = c.nombre;
             const nLower = nombre.trim().toLowerCase();
             if (nLower === '1' || nLower === 'manicurista 1') nombre = 'Especialista 1';
@@ -1334,6 +1382,10 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
           setPerfilActual(actualizado);
           localStorage.setItem('opalo_staff_profile', JSON.stringify(actualizado));
         }
+      } else {
+        // Si el perfil guardado no corresponde a ninguno de los perfiles válidos, volver al selector
+        setPerfilActual(null);
+        localStorage.removeItem('opalo_staff_profile');
       }
     }
   }, [perfilesConIds]);
@@ -2342,8 +2394,8 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                     const telLimpio = String(cita.clientes?.telefono_wa || '').replace(/\D/g, '');
                     const puedeDesbloquear = esAdmin || (perfilActual?.canchaId === cita.cancha_id);
 
-                    const inicioMs = new Date(cita.fecha_inicio).getTime();
-                    const finMs = cita.fecha_fin ? new Date(cita.fecha_fin).getTime() : inicioMs + 45 * 60000;
+                    const inicioMs = new Date(normalizarIsoBogota(cita.fecha_inicio)).getTime();
+                    const finMs = cita.fecha_fin ? new Date(normalizarIsoBogota(cita.fecha_fin)).getTime() : inicioMs + 45 * 60000;
                     const estaEnAtencion = esHoy && !esBloqueada && cita.estado !== 'completada' && cita.estado !== 'cancelada' && ahoraMs >= inicioMs && ahoraMs < finMs;
 
                     const leftPercent = (colIndex / totalCols) * 100;
@@ -2694,9 +2746,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                 {diasDeLaSemana.map((d) => {
                   const citasDelDia = citasFiltradas.filter((r) => {
                     if (!r.fecha_inicio) return false;
-                    const fCita = new Date(r.fecha_inicio).toLocaleDateString('en-CA', {
-                      timeZone: 'America/Bogota',
-                    });
+                    const fCita = parsearFechaBogotaIso(r.fecha_inicio);
                     return fCita === d.fechaIso && r.estado !== 'cancelada' && r.estado !== 'bloqueada';
                   });
 
@@ -2781,9 +2831,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                 {diasDeLaSemana.map((d) => {
                   const citasDelDia = citasFiltradas.filter((r) => {
                     if (!r.fecha_inicio) return false;
-                    const fCita = new Date(r.fecha_inicio).toLocaleDateString('en-CA', {
-                      timeZone: 'America/Bogota',
-                    });
+                    const fCita = parsearFechaBogotaIso(r.fecha_inicio);
                     return fCita === d.fechaIso && r.estado !== 'cancelada';
                   });
 
@@ -2818,8 +2866,8 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                           const nombreClienta = obtenerNombreClienta(cita);
                           const servicioNombre = obtenerServicioCita(cita);
 
-                          const inicioMs = new Date(cita.fecha_inicio).getTime();
-                          const finMs = cita.fecha_fin ? new Date(cita.fecha_fin).getTime() : inicioMs + 45 * 60000;
+                          const inicioMs = new Date(normalizarIsoBogota(cita.fecha_inicio)).getTime();
+                          const finMs = cita.fecha_fin ? new Date(normalizarIsoBogota(cita.fecha_fin)).getTime() : inicioMs + 45 * 60000;
                           const estaEnAtencion = d.esHoy && !esBloqueada && cita.estado !== 'completada' && cita.estado !== 'cancelada' && ahoraMs >= inicioMs && ahoraMs < finMs;
 
                           const leftPercent = (colIndex / totalCols) * 100;
@@ -3426,8 +3474,8 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
               {canchas.map((cancha, i) => {
                 const totalCitas =
                   vistaAgenda === 'dia'
-                    ? reservasDelDia.filter((r) => r.cancha_id === cancha.id && r.estado !== 'cancelada').length
-                    : citasClientesDeLaSemana.filter((r) => r.cancha_id === cancha.id).length;
+                    ? reservasDelDia.filter((r) => reservaCorrespondeACancha(r, cancha, i) && r.estado !== 'cancelada').length
+                    : citasClientesDeLaSemana.filter((r) => reservaCorrespondeACancha(r, cancha, i)).length;
 
                 return (
                   <button
@@ -3453,14 +3501,21 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
               renderVistaSemanal(
                 especialistaSeleccionadaId === 'todas'
                   ? reservasDeLaSemana.filter((r) => r.estado !== 'cancelada')
-                  : reservasDeLaSemana.filter((r) => r.cancha_id === especialistaSeleccionadaId && r.estado !== 'cancelada'),
+                  : reservasDeLaSemana.filter((r) => {
+                      const targetCancha = canchas.find((c) => c.id === especialistaSeleccionadaId);
+                      const targetIdx = canchas.findIndex((c) => c.id === especialistaSeleccionadaId);
+                      return (targetCancha ? reservaCorrespondeACancha(r, targetCancha, targetIdx) : r.cancha_id === especialistaSeleccionadaId) && r.estado !== 'cancelada';
+                    }),
                 true,
                 especialistaSeleccionadaId
               )
             ) : especialistaSeleccionadaId !== 'todas' ? (
               (() => {
                 const targetCancha = canchas.find((c) => c.id === especialistaSeleccionadaId);
-                const citasTarget = reservasDelDia.filter((r) => r.cancha_id === especialistaSeleccionadaId && r.estado !== 'cancelada');
+                const targetIdx = canchas.findIndex((c) => c.id === especialistaSeleccionadaId);
+                const citasTarget = reservasDelDia.filter(
+                  (r) => (targetCancha ? reservaCorrespondeACancha(r, targetCancha, targetIdx) : r.cancha_id === especialistaSeleccionadaId) && r.estado !== 'cancelada'
+                );
                 return renderTimelineManicurista(
                   citasTarget,
                   targetCancha?.nombre || 'Especialista',
@@ -3473,11 +3528,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {canchas.map((cancha, idx) => {
                 const citasCancha = reservasDelDia.filter(
-                  (r) =>
-                    (r.cancha_id === cancha.id ||
-                      r.canchas?.id === cancha.id ||
-                      (r.canchas?.nombre && r.canchas.nombre.toLowerCase().includes(cancha.nombre.toLowerCase()))) &&
-                    r.estado !== 'cancelada'
+                  (r) => reservaCorrespondeACancha(r, cancha, idx) && r.estado !== 'cancelada'
                 );
 
                 return (
@@ -3526,8 +3577,8 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                           const servicioNombre = obtenerServicioCita(cita);
                           const telLimpio = String(cita.clientes?.telefono_wa || '').replace(/\D/g, '');
 
-                          const inicioMs = new Date(cita.fecha_inicio).getTime();
-                          const finMs = cita.fecha_fin ? new Date(cita.fecha_fin).getTime() : inicioMs + 45 * 60000;
+                          const inicioMs = new Date(normalizarIsoBogota(cita.fecha_inicio)).getTime();
+                          const finMs = cita.fecha_fin ? new Date(normalizarIsoBogota(cita.fecha_fin)).getTime() : inicioMs + 45 * 60000;
                           const ahoraMs = ahora.getTime();
                           const esHoy = fechaSeleccionada === hoyStr;
                           const estaEnAtencion = esHoy && !esBloqueada && cita.estado !== 'completada' && cita.estado !== 'cancelada' && ahoraMs >= inicioMs && ahoraMs < finMs;
@@ -4168,25 +4219,24 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
                   <span>Bloquear Mi Horario</span>
                 </button>
                 {(() => {
-                  const effectiveCanchaId =
-                    perfilActual.canchaId ||
-                    canchas.find((c) =>
-                      c.nombre.toLowerCase().includes(perfilActual.nombre.toLowerCase())
-                    )?.id;
+                  const targetIdx = perfilesConIds.findIndex((p) => p.id === perfilActual.id) - 1;
+                  const canchaAsignada =
+                    canchas.find((c) => c.id === perfilActual.canchaId) ||
+                    (targetIdx >= 0 && targetIdx < canchas.length ? canchas[targetIdx] : undefined) ||
+                    canchas.find((c) => {
+                      const cNom = c.nombre.toLowerCase();
+                      const pNom = (perfilActual.canchaNombreMatch || perfilActual.nombre).toLowerCase();
+                      return cNom.includes(pNom) || pNom.includes(cNom);
+                    });
 
                   const matchCanchaEspecialista = (r: Reserva) => {
-                    if (
-                      effectiveCanchaId &&
-                      (r.cancha_id === effectiveCanchaId || r.canchas?.id === effectiveCanchaId)
-                    ) {
+                    if (canchaAsignada && reservaCorrespondeACancha(r, canchaAsignada, targetIdx)) {
                       return true;
                     }
-                    const matchNom = perfilActual.canchaNombreMatch || perfilActual.nombre;
-                    return Boolean(
-                      r.canchas?.nombre &&
-                        matchNom &&
-                        r.canchas.nombre.toLowerCase().includes(matchNom.toLowerCase())
-                    );
+                    if (perfilActual.canchaId && (r.cancha_id === perfilActual.canchaId || r.canchas?.id === perfilActual.canchaId)) {
+                      return true;
+                    }
+                    return false;
                   };
 
                   const citasHoy = citasClientesDelDia.filter(matchCanchaEspecialista).length;
@@ -4223,25 +4273,26 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
 
             {/* VISTA SEGÚN MODO DÍA O SEMANA */}
             {(() => {
-              const effectiveCanchaId =
-                perfilActual.canchaId ||
-                canchas.find((c) =>
-                  c.nombre.toLowerCase().includes(perfilActual.nombre.toLowerCase())
-                )?.id;
+              const targetIdx = perfilesConIds.findIndex((p) => p.id === perfilActual.id) - 1;
+              const canchaAsignada =
+                canchas.find((c) => c.id === perfilActual.canchaId) ||
+                (targetIdx >= 0 && targetIdx < canchas.length ? canchas[targetIdx] : undefined) ||
+                canchas.find((c) => {
+                  const cNom = c.nombre.toLowerCase();
+                  const pNom = (perfilActual.canchaNombreMatch || perfilActual.nombre).toLowerCase();
+                  return cNom.includes(pNom) || pNom.includes(cNom);
+                });
+
+              const effectiveCanchaId = canchaAsignada?.id || perfilActual.canchaId;
 
               const matchCanchaEspecialista = (r: Reserva) => {
-                if (
-                  effectiveCanchaId &&
-                  (r.cancha_id === effectiveCanchaId || r.canchas?.id === effectiveCanchaId)
-                ) {
+                if (canchaAsignada && reservaCorrespondeACancha(r, canchaAsignada, targetIdx)) {
                   return true;
                 }
-                const matchNom = perfilActual.canchaNombreMatch || perfilActual.nombre;
-                return Boolean(
-                  r.canchas?.nombre &&
-                    matchNom &&
-                    r.canchas.nombre.toLowerCase().includes(matchNom.toLowerCase())
-                );
+                if (perfilActual.canchaId && (r.cancha_id === perfilActual.canchaId || r.canchas?.id === perfilActual.canchaId)) {
+                  return true;
+                }
+                return false;
               };
 
               return vistaAgenda === 'semana' ? (
