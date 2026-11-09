@@ -109,6 +109,8 @@ CREATE TABLE IF NOT EXISTS reservas (
     recordatorio_enviado BOOLEAN NOT NULL DEFAULT false,
     expiracion_reserva TIMESTAMPTZ,
     expira_en TIMESTAMPTZ,
+    actualizado_en TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     -- Restricción física anti-solapamiento (evita doble agendamiento para la misma especialista)
@@ -357,7 +359,8 @@ BEGIN
         INSERT INTO canchas (complejo_id, nombre, deporte, tipo, especialidad, precio_estandar, precio_pico, precio_base_hora) VALUES
             (v_complejo_id, 'Especialista 1', 'belleza_unas', 'general', 'Uñas, Cejas y Pestañas', 46000, 46000, 46000),
             (v_complejo_id, 'Especialista 2', 'belleza_unas', 'general', 'Uñas, Cejas y Pestañas', 46000, 46000, 46000),
-            (v_complejo_id, 'Especialista 3', 'belleza_unas', 'general', 'Uñas, Cejas y Pestañas', 46000, 46000, 46000);
+            (v_complejo_id, 'Especialista 3', 'belleza_unas', 'general', 'Uñas, Cejas y Pestañas', 46000, 46000, 46000),
+            (v_complejo_id, 'Especialista 4', 'belleza_unas', 'general', 'Uñas, Cejas y Pestañas', 46000, 46000, 46000);
     END IF;
 
     -- 6.3 Insertar Catálogo Oficial en la tabla `servicios`

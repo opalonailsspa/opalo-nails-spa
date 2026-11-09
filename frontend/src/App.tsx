@@ -56,7 +56,6 @@ export function App() {
       <Suspense fallback={<PantallaCarga mensaje="Cargando Panel de Administración..." />}>
         <OpaloNailsDashboard
           onIrAWebReservas={irAReservas}
-          complejoId="3bd1708c-21de-42a8-a529-d7c91fd41ed2"
         />
       </Suspense>
     );

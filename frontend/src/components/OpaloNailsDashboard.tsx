@@ -83,61 +83,51 @@ export interface StaffProfile {
   canchaId?: string;
 }
 
-const FOTOS_EQUIPO_ADMIN: Record<string, string> = {
-  'lili': '/equipo/lili.jpg',
-  'jhoana': '/equipo/jhoana.jpg',
-  'manuela': '/equipo/manuela.jpg',
-  'manicurista 1': '/equipo/lili.jpg',
-  'manicurista 2': '/equipo/jhoana.jpg',
-  'manicurista 3': '/equipo/manuela.jpg',
-};
+const FOTOS_EQUIPO_ADMIN: Record<string, string> = {};
 
 const PERFILES_SPA_CONFIG: Omit<StaffProfile, 'canchaId'>[] = [
   {
     id: 'admin-m1',
-    canchaNombreMatch: 'Lili',
-    nombre: 'Lili (Administradora)',
-    alias: 'Lili (Admin & Especialista)',
+    canchaNombreMatch: 'Especialista 1',
+    nombre: 'Especialista 1 (Administradora)',
+    alias: 'Especialista 1 (Admin & Especialista)',
     rol: 'admin',
     pin: '1234',
     descripcion: 'Acceso Total: Supervisión de todas las tablas, métricas de reservas y agendamiento exclusivo.',
     avatar: '👑',
-    foto: '/equipo/lili.jpg',
     colorBadge: 'bg-[#E8F0E5] text-[#2E5A44] border-[#C5D6BE]',
   },
   {
     id: 'admin-m2',
-    canchaNombreMatch: 'Jhoana',
-    nombre: 'Jhoana (Administradora)',
-    alias: 'Jhoana (Admin & Especialista)',
+    canchaNombreMatch: 'Especialista 2',
+    nombre: 'Especialista 2 (Administradora)',
+    alias: 'Especialista 2 (Admin & Especialista)',
     rol: 'admin',
     pin: '1234',
     descripcion: 'Acceso Total: Supervisión de todas las tablas, métricas de reservas y agendamiento exclusivo.',
     avatar: '👑',
-    foto: '/equipo/jhoana.jpg',
     colorBadge: 'bg-[#E8F0E5] text-[#2E5A44] border-[#C5D6BE]',
   },
   {
     id: 'staff-m3',
-    canchaNombreMatch: 'Manuela',
-    nombre: 'Manuela',
-    alias: 'Manuela (Especialista)',
+    canchaNombreMatch: 'Especialista 3',
+    nombre: 'Especialista 3',
+    alias: 'Especialista 3 (Especialista)',
     rol: 'manicurista',
     pin: '1234',
     descripcion: 'Vista personal de turnos del día y gestión de atención de clientas asignadas.',
     avatar: '💅',
-    foto: '/equipo/manuela.jpg',
     colorBadge: 'bg-[#F5F8F4] text-[#C5A059] border-[#C5D6BE]',
   },
   {
     id: 'staff-m4',
-    canchaNombreMatch: 'Manicurista 4',
-    nombre: 'Manicurista 4',
-    alias: 'Manicurista 4',
+    canchaNombreMatch: 'Especialista 4',
+    nombre: 'Especialista 4',
+    alias: 'Especialista 4 (Especialista)',
     rol: 'manicurista',
     pin: '1234',
     descripcion: 'Vista personal de turnos del día y gestión de atención de clientas asignadas.',
-    avatar: '🌸',
+    avatar: '🌿',
     colorBadge: 'bg-[#F5F8F4] text-[#C5A059] border-[#C5D6BE]',
   },
 ];
@@ -173,37 +163,42 @@ function obtenerServicioCita(cita: Reserva): string {
   // Deducción inteligente si las notas no contienen el tag Servicio:
   const notasLower = (cita.notas || '').toLowerCase();
   const serviciosConocidos = [
-    'extensiones de pestañas', 'lifting de pestañas', 'pestañas punto a punto',
-    'retoque de pestañas', 'retiro de pestañas', 'laminado de cejas',
-    'diseño de cejas', 'cejas con henna', 'depilación de cejas', 'depilacion de cejas',
-    'semi manos y pies', 'manos y pies', 'semi pies', 'semipermanente',
-    'pies hombre', 'manos hombre', 'semi hombre', 'base rubber', 'press on',
-    'retoque press', 'dipping', 'retiro acrilico', 'retiro semi', 'retiro',
-    'acrilico', 'barrido', 'retoque', 'pestañas', 'cejas', 'pies', 'manos'
+    'pestañas pelo a pelo volumen ruso', 'pestañas pelo a pelo volumen brasileño',
+    'pestañas pelo a pelo efecto pestañina', 'pestañas pelo a pelo clásicas',
+    'pestañas híbridas', 'pestañas 3d', 'lifting de pestañas', 'laminado de cejas',
+    'cera y henna', 'hilo y henna', 'depilación con hilo', 'depilación con cera',
+    'bigote con hilo', 'bigote con cera', 'henna',
+    'acrílicas esculpidas', 'acrílicas con tip', 'recubrimiento en acrílico',
+    'sistema press on', 'retoque de acrílico o press on', 'retiro de acrílico definitivo',
+    'retiro definitivo semipermanente', 'manicura semipermanente full', 'manicura solo tono',
+    'pedicura semi', 'dipping + semi', 'base ruber', 'manicura tradicional',
+    'pedicura tradicional', 'limpieza', 'pestañas', 'cejas', 'uñas'
   ];
   const encontrados = serviciosConocidos.filter((nombre) => notasLower.includes(nombre));
   if (encontrados.length > 0) {
     return encontrados.map((e) => e.charAt(0).toUpperCase() + e.slice(1)).join(' + ');
   }
 
-  // Deducción por valor monetario si las notas fueron formateadas externamente
+  // Deducción por valor monetario oficial de Ópalo Nails Spa
   const v = Number(cita.valor_total || 0);
-  if (v === 130000) return 'Extensiones de Pestañas Volumen';
-  if (v === 110000) return 'Extensiones de Pestañas Clásicas';
-  if (v === 103000) return 'Manos y pies + Semi hombre + Semipermanente';
-  if (v === 90000) return 'Acrilico';
-  if (v === 75000) return 'Semi Manos y Pies';
-  if (v === 70000) return 'Lifting de Pestañas';
-  if (v === 65000) return 'Press on';
-  if (v === 55000) return 'Base Rubber';
-  if (v === 50000) return 'Retoque press';
-  if (v === 43000) return 'Semipermanente';
-  if (v === 38000) return 'Semi pies';
-  if (v === 35000) return 'Manos y pies';
-  if (v === 25000) return 'Semi hombre';
-  if (v === 20000) return 'Pies';
-  if (v === 16000) return 'Manos';
-  if (v === 14000) return 'Manos hombre';
+  if (v === 110000) return 'Pestañas pelo a pelo volumen ruso';
+  if (v === 100000) return 'Acrílicas esculpidas / Pestañas Híbridas o 3D';
+  if (v === 90000) return 'Acrílicas con tip / Volumen brasileño';
+  if (v === 80000) return 'Pestañas pelo a pelo clásicas';
+  if (v === 75000) return 'Sistema Press On / Recubrimiento en acrílico';
+  if (v === 65000) return 'Retoque de acrílico o Press On';
+  if (v === 55000) return 'Laminado de cejas / Lifting de pestañas';
+  if (v === 53000) return 'Base Ruber / Dipping + Semi';
+  if (v === 46000) return 'Manicura semipermanente full';
+  if (v === 39000) return 'Manicura solo tono / Pedicura Semi';
+  if (v === 22000) return 'Cera y henna';
+  if (v === 20000) return 'Depilación con hilo';
+  if (v === 18000) return 'Manicura o Pedicura tradicional';
+  if (v === 16000) return 'Hilo y henna';
+  if (v === 15000) return 'Depilación con cera / Retiro de acrílico';
+  if (v === 13000) return 'Limpieza';
+  if (v === 10000) return 'Bigote con hilo / Uña esculpida';
+  if (v === 8000) return 'Henna / Bigote con cera / Retiro semi';
 
   return 'Servicio de Uñas, Cejas o Pestañas';
 }
@@ -392,7 +387,7 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
   const hoyStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' }); // YYYY-MM-DD
   const [fechaSeleccionada, setFechaSeleccionada] = useState<string>(hoyStr);
   const [idComplejoDetectado, setIdComplejoDetectado] = useState<string>(
-    complejoId || '3bd1708c-21de-42a8-a529-d7c91fd41ed2'
+    complejoId || ''
   );
   const [perfilActual, setPerfilActual] = useState<StaffProfile | null>(() => {
     try {
@@ -581,16 +576,27 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
       const notaExtra = ` | ✨ Adicional: +$${monto.toLocaleString('es-CO')} [ADICIONAL:${monto}]`;
       const nuevasNotas = (citaActual.notas || '') + notaExtra;
 
-      const { error } = await supabase
-        .from('reservas')
-        .update({
-          valor_total: nuevoValorTotal,
-          notas: nuevasNotas,
-          actualizado_en: new Date().toISOString(),
-        })
-        .eq('id', reservaId);
+      let apiOk = false;
+      try {
+        const res = await fetch(`/api/reservas/${reservaId}/adicional`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ valor_total: nuevoValorTotal, notas: nuevasNotas }),
+        });
+        if (res.ok) apiOk = true;
+      } catch {}
 
-      if (error) throw error;
+      if (!apiOk) {
+        const { error } = await supabase
+          .from('reservas')
+          .update({
+            valor_total: nuevoValorTotal,
+            notas: nuevasNotas,
+          })
+          .eq('id', reservaId);
+
+        if (error) throw error;
+      }
 
       // Actualizar estado local de reservas
       setReservas((prev) =>
@@ -629,16 +635,27 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
         .replace(/\[ADICIONAL:\d+\]/gi, '')
         .trim();
 
-      const { error } = await supabase
-        .from('reservas')
-        .update({
-          valor_total: nuevoValorTotal,
-          notas: nuevasNotas,
-          actualizado_en: new Date().toISOString(),
-        })
-        .eq('id', cita.id);
+      let apiOk = false;
+      try {
+        const res = await fetch(`/api/reservas/${cita.id}/adicional`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ valor_total: nuevoValorTotal, notas: nuevasNotas }),
+        });
+        if (res.ok) apiOk = true;
+      } catch {}
 
-      if (error) throw error;
+      if (!apiOk) {
+        const { error } = await supabase
+          .from('reservas')
+          .update({
+            valor_total: nuevoValorTotal,
+            notas: nuevasNotas,
+          })
+          .eq('id', cita.id);
+
+        if (error) throw error;
+      }
 
       setReservas((prev) =>
         prev.map((r) =>
@@ -1041,15 +1058,16 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
       const res = await fetch('/api/spa/info');
       if (res.ok) {
         const d = await res.json();
-        const idReal = d.complejo?.id || complejoId || '3bd1708c-21de-42a8-a529-d7c91fd41ed2';
+        const idReal = d.complejo?.id || complejoId || '';
         setIdComplejoDetectado(idReal);
         if (d.equipo) {
           const normalizadas = d.equipo.map((c: any) => {
             let nombre = c.nombre;
             const nLower = nombre.trim().toLowerCase();
-            if (nLower.includes('manicurista 1') || nLower === '1') nombre = 'Lili';
-            else if (nLower.includes('manicurista 2') || nLower === '2') nombre = 'Jhoana';
-            else if (nLower.includes('manicurista 3') || nLower === '3') nombre = 'Manuela';
+            if (nLower === '1' || nLower === 'manicurista 1') nombre = 'Especialista 1';
+            else if (nLower === '2' || nLower === 'manicurista 2') nombre = 'Especialista 2';
+            else if (nLower === '3' || nLower === 'manicurista 3') nombre = 'Especialista 3';
+            else if (nLower === '4' || nLower === 'manicurista 4') nombre = 'Especialista 4';
             const foto = c.foto || FOTOS_EQUIPO_ADMIN[nombre.toLowerCase()] || FOTOS_EQUIPO_ADMIN[c.nombre.toLowerCase()] || null;
             return { ...c, nombre, foto };
           });
@@ -1083,8 +1101,9 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
       const spaId =
         typeof overrideId === 'string' && overrideId
           ? overrideId
-          : idComplejoDetectado || complejoId || '3bd1708c-21de-42a8-a529-d7c91fd41ed2';
-      const res = await fetch(`/api/reservas?complejo_id=${spaId}`);
+          : idComplejoDetectado || complejoId || '';
+      const url = spaId ? `/api/reservas?complejo_id=${spaId}` : '/api/reservas';
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         setReservas(data || []);
@@ -1178,10 +1197,10 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
         const pMatch = p.canchaNombreMatch.toLowerCase();
         return (
           cLower.includes(pMatch) ||
-          (p.id === 'admin-m1' && (cLower.includes('1') || cLower.includes('lili'))) ||
-          ((p.id === 'staff-m2' || p.id === 'admin-m2') && (cLower.includes('2') || cLower.includes('jhoana'))) ||
-          (p.id === 'staff-m3' && (cLower.includes('3') || cLower.includes('manuela'))) ||
-          (p.id === 'staff-m4' && (cLower.includes('4') || cLower.includes('manicurista 4')))
+          (p.id === 'admin-m1' && cLower.includes('1')) ||
+          ((p.id === 'staff-m2' || p.id === 'admin-m2') && cLower.includes('2')) ||
+          (p.id === 'staff-m3' && cLower.includes('3')) ||
+          (p.id === 'staff-m4' && cLower.includes('4'))
         );
       });
       return {
@@ -3353,21 +3372,21 @@ export const OpaloNailsDashboard: React.FC<Props> = ({ onIrAWebReservas, complej
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {canchas.map((cancha, idx) => {
                 const citasCancha = reservasDelDia.filter((r) => r.cancha_id === cancha.id && r.estado !== 'cancelada');
-                const esColumnaAdmin = cancha.nombre.toLowerCase().includes('lili') || cancha.nombre.toLowerCase().includes('jhoana');
+                const esColumnaAdmin = idx < 2 || cancha.nombre.toLowerCase().includes('especialista 1') || cancha.nombre.toLowerCase().includes('especialista 2');
 
                 return (
                   <div
                     key={cancha.id}
                     className="bg-white rounded-2xl border border-[#C5D6BE] shadow-xs flex flex-col justify-between overflow-hidden"
                   >
-                    {/* Encabezado de la Manicurista */}
+                    {/* Encabezado de la Especialista */}
                     <div className="p-3.5 bg-gradient-to-r from-[#F5F8F4] to-[#E8F0E5] border-b border-[#C5D6BE] flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <div className="w-9 h-9 rounded-full bg-white border-2 border-[#C5D6BE] overflow-hidden flex items-center justify-center font-bold text-xs text-[#2E5A44] shrink-0 shadow-2xs">
                           {cancha.foto || FOTOS_EQUIPO_ADMIN[cancha.nombre.toLowerCase()] ? (
                             <img src={cancha.foto || FOTOS_EQUIPO_ADMIN[cancha.nombre.toLowerCase()]} alt={cancha.nombre} className="w-full h-full object-cover" />
                           ) : (
-                            <span>{esColumnaAdmin ? '👑' : `M${idx + 1}`}</span>
+                            <span>{esColumnaAdmin ? '👑' : `E${idx + 1}`}</span>
                           )}
                         </div>
                         <div>

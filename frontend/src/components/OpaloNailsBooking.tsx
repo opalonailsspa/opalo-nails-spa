@@ -33,24 +33,15 @@ interface Empleada {
   foto?: string | null;
 }
 
-const FOTOS_EQUIPO_OPALO: Record<string, string> = {
-  'lili': '/equipo/lili.jpg',
-  'jhoana': '/equipo/jhoana.jpg',
-  'manuela': '/equipo/manuela.jpg',
-  'manicurista 1': '/equipo/lili.jpg',
-  'manicurista 2': '/equipo/jhoana.jpg',
-  'manicurista 3': '/equipo/manuela.jpg',
-  'especialista 1': '/equipo/lili.jpg',
-  'especialista 2': '/equipo/jhoana.jpg',
-  'especialista 3': '/equipo/manuela.jpg',
-};
+const FOTOS_EQUIPO_OPALO: Record<string, string> = {};
 
 function normalizarNombreYFotoEmpleada(emp: { id: string; nombre: string; foto?: string | null }): Empleada {
   let nombre = emp.nombre;
   const nLower = nombre.trim().toLowerCase();
-  if (nLower.includes('manicurista 1') || nLower === '1') nombre = 'Lili';
-  else if (nLower.includes('manicurista 2') || nLower === '2') nombre = 'Jhoana';
-  else if (nLower.includes('manicurista 3') || nLower === '3') nombre = 'Manuela';
+  if (nLower === '1' || nLower === 'manicurista 1') nombre = 'Especialista 1';
+  else if (nLower === '2' || nLower === 'manicurista 2') nombre = 'Especialista 2';
+  else if (nLower === '3' || nLower === 'manicurista 3') nombre = 'Especialista 3';
+  else if (nLower === '4' || nLower === 'manicurista 4') nombre = 'Especialista 4';
 
   const foto = emp.foto || FOTOS_EQUIPO_OPALO[nombre.toLowerCase()] || FOTOS_EQUIPO_OPALO[emp.nombre.toLowerCase()] || null;
   return { id: emp.id, nombre, foto };
@@ -1200,11 +1191,11 @@ export const OpaloNailsBooking: React.FC<Props> = ({ onIrAlAdmin }) => {
 
         <div className="relative z-10 max-w-2xl mx-auto space-y-4">
           {/* LOGOTIPO OFICIAL DE ÓPALO NAILS SPA */}
-          <div className="relative w-44 h-44 sm:w-52 sm:h-52 mx-auto rounded-3xl overflow-hidden shadow-lg border-2 border-[#C5A059] bg-[#90B083] transition-transform hover:scale-105 duration-300">
+          <div className="relative w-44 h-44 sm:w-52 sm:h-52 mx-auto rounded-full overflow-hidden shadow-lg border-2 border-[#C5A059] bg-white transition-transform hover:scale-105 duration-300">
             <img
               src="/opalo-nails-logo.png"
               alt="Ópalo Nails Spa - Uñas, Cejas y Pestañas en Pereira"
-              className="w-full h-full object-cover"
+              className="w-full h-full object-cover scale-105"
             />
           </div>
 

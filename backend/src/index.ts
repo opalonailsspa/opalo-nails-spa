@@ -747,19 +747,41 @@ app.get('/api/canchas', async (req: Request, res: Response) => {
 app.get('/api/reservas', async (req: Request, res: Response) => {
   const { desde, hasta, complejo_id } = req.query;
 
+  let targetComplejoId = complejo_id ? String(complejo_id) : '';
+  if (!targetComplejoId) {
+    const comp = await obtenerComplejoSpa();
+    if (comp?.id) targetComplejoId = comp.id;
+  }
+
   let query = supabase
     .from('reservas')
     .select('*, canchas!inner(id, nombre, deporte, complejo_id), clientes(nombre, telefono_wa), pagos_anticipos(*)');
 
-  if (complejo_id) {
-    query = query.eq('canchas.complejo_id', complejo_id as string);
+  if (targetComplejoId) {
+    query = query.eq('canchas.complejo_id', targetComplejoId);
   }
   if (desde) query = query.gte('fecha_inicio', desde as string);
   if (hasta) query = query.lte('fecha_fin', hasta as string);
 
-  const { data, error } = await query;
+  let { data, error } = await query;
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+
+  // Si se pasó un complejo_id antiguo y no devolvió resultados, usar el complejo principal activo
+  if ((!data || data.length === 0) && complejo_id) {
+    const comp = await obtenerComplejoSpa();
+    if (comp?.id && comp.id !== targetComplejoId) {
+      let fallbackQuery = supabase
+        .from('reservas')
+        .select('*, canchas!inner(id, nombre, deporte, complejo_id), clientes(nombre, telefono_wa), pagos_anticipos(*)')
+        .eq('canchas.complejo_id', comp.id);
+      if (desde) fallbackQuery = fallbackQuery.gte('fecha_inicio', desde as string);
+      if (hasta) fallbackQuery = fallbackQuery.lte('fecha_fin', hasta as string);
+      const fb = await fallbackQuery;
+      if (!fb.error && fb.data) data = fb.data;
+    }
+  }
+
+  res.json(data || []);
 });
 
 // Bloquear Horarios (1 hora o varias horas, para admin o manicuristas)
@@ -912,6 +934,31 @@ app.patch('/api/reservas/:id/estado', async (req: Request, res: Response) => {
   if (error) return res.status(500).json({ error: error.message });
   notificarCambioReservas('UPDATE', { id });
   res.json(data);
+});
+
+// Actualizar valor total y notas por adicional de servicio (decorados, diseño extra, etc.)
+app.patch('/api/reservas/:id/adicional', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!esUUIDValido(id)) return res.status(400).json({ error: 'ID de reserva inválido' });
+  const { valor_total, notas } = req.body;
+  const numValor = Number(valor_total);
+  if (isNaN(numValor) || numValor < 0) {
+    return res.status(400).json({ error: 'Valor total inválido' });
+  }
+
+  const { data, error } = await supabase
+    .from('reservas')
+    .update({
+      valor_total: numValor,
+      notas: typeof notas === 'string' ? notas.slice(0, 1000) : '',
+    })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  notificarCambioReservas('UPDATE', { id });
+  res.json({ success: true, reserva: data });
 });
 
 // Obtener detalles de una reserva por ID
@@ -2047,15 +2094,32 @@ app.post('/api/spa/reservar', bookingLimiter, async (req: Request, res: Response
 // Métricas y Resumen Financiero filtradas por complejo
 app.get('/api/metricas', async (req: Request, res: Response) => {
   try {
-    const { complejo_id } = req.query;
+    let { complejo_id } = req.query;
+    if (!complejo_id) {
+      const complejoActual = await obtenerComplejoSpa();
+      if (complejoActual?.id) complejo_id = complejoActual.id;
+    }
     let query = supabase.from('reservas').select('estado, valor_total, valor_anticipo_requerido, canchas!inner(complejo_id)');
 
     if (complejo_id) {
       query = query.eq('canchas.complejo_id', complejo_id as string);
     }
 
-    const { data: reservas, error } = await query;
+    let { data: reservas, error } = await query;
     if (error) throw error;
+
+    if ((!reservas || reservas.length === 0) && complejo_id) {
+      const complejoActual = await obtenerComplejoSpa();
+      if (complejoActual?.id && complejoActual.id !== complejo_id) {
+        const retry = await supabase
+          .from('reservas')
+          .select('estado, valor_total, valor_anticipo_requerido, canchas!inner(complejo_id)')
+          .eq('canchas.complejo_id', complejoActual.id);
+        if (!retry.error && retry.data) {
+          reservas = retry.data;
+        }
+      }
+    }
 
     const totalReservas = reservas?.length || 0;
     const confirmadas = reservas?.filter((r) => r.estado === 'confirmada' || r.estado === 'completada') || [];

@@ -101,9 +101,10 @@ export interface Cancha {
 }
 
 export const MAPA_MANICURISTAS: Record<string, { nombre: string; foto: string | null }> = {
-  'Lili': { nombre: 'Lili', foto: '/equipo/lili.jpg' },
-  'Jhoana': { nombre: 'Jhoana', foto: '/equipo/jhoana.jpg' },
-  'Manuela': { nombre: 'Manuela', foto: '/equipo/manuela.jpg' },
+  'Especialista 1': { nombre: 'Especialista 1', foto: null },
+  'Especialista 2': { nombre: 'Especialista 2', foto: null },
+  'Especialista 3': { nombre: 'Especialista 3', foto: null },
+  'Especialista 4': { nombre: 'Especialista 4', foto: null },
 };
 
 export function enriquecerCancha<T extends { id?: string; nombre?: string }>(cancha: T): T & { foto?: string | null } {

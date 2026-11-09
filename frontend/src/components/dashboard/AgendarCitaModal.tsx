@@ -146,19 +146,14 @@ export const AgendarCitaModal: React.FC<AgendarCitaModalProps> = ({
                 >
                   <span className="flex items-center gap-2">
                     {(() => {
-                      const foto = manicuristaSeleccionadaForm && (
-                        (manicuristaSeleccionadaForm as any).foto ||
-                        (manicuristaSeleccionadaForm.nombre.toLowerCase().includes('lili') ? '/equipo/lili.jpg' :
-                         manicuristaSeleccionadaForm.nombre.toLowerCase().includes('jhoana') ? '/equipo/jhoana.jpg' :
-                         manicuristaSeleccionadaForm.nombre.toLowerCase().includes('manuela') ? '/equipo/manuela.jpg' : null)
-                      );
+                      const foto = manicuristaSeleccionadaForm && (manicuristaSeleccionadaForm as any).foto;
                       return foto ? (
                         <img src={foto} alt={manicuristaSeleccionadaForm?.nombre} className="w-6 h-6 rounded-full object-cover border border-[#C5D6BE]" />
                       ) : (
                         <span className="w-5 h-5 rounded-full bg-[#E8F0E5] text-[#2E5A44] flex items-center justify-center text-[10px]">💅</span>
                       );
                     })()}
-                    <span>{manicuristaSeleccionadaForm?.nombre || 'Seleccionar Manicurista'}</span>
+                    <span>{manicuristaSeleccionadaForm?.nombre || 'Seleccionar Especialista'}</span>
                   </span>
                   <IconChevronDown
                     className={`w-4 h-4 text-[#2E5A44] transition-transform ${
@@ -192,14 +187,11 @@ export const AgendarCitaModal: React.FC<AgendarCitaModalProps> = ({
                           >
                             <div className="flex items-center gap-2.5">
                               {(() => {
-                                const foto = (c as any).foto ||
-                                  (c.nombre.toLowerCase().includes('lili') ? '/equipo/lili.jpg' :
-                                   c.nombre.toLowerCase().includes('jhoana') ? '/equipo/jhoana.jpg' :
-                                   c.nombre.toLowerCase().includes('manuela') ? '/equipo/manuela.jpg' : null);
+                                const foto = (c as any).foto;
                                 return foto ? (
                                   <img src={foto} alt={c.nombre} className="w-6 h-6 rounded-full object-cover border border-[#C5D6BE] shrink-0" />
                                 ) : (
-                                  <span className="w-6 h-6 rounded-full bg-[#E8F0E5] text-[#2E5A44] text-[10px] flex items-center justify-center font-bold shrink-0">{i === 0 ? '👑' : `M${i + 1}`}</span>
+                                  <span className="w-6 h-6 rounded-full bg-[#E8F0E5] text-[#2E5A44] text-[10px] flex items-center justify-center font-bold shrink-0">{i === 0 ? '👑' : `E${i + 1}`}</span>
                                 );
                               })()}
                               <span className="text-xs font-semibold">{c.nombre}</span>
